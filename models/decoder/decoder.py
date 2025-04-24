@@ -1,27 +1,21 @@
 """
-decoder.py - Cross-Scale Attention Decoder for Dun Huang Mural Restoration
+decoder.py - High-Performance Decoder for Dun Huang Mural Restoration
 
-This module implements the decoder part of the mural restoration architecture with
-Cross-Scale Attention (CSA) blocks, dynamic window sizes, and skip connections.
-The decoder progressively upsamples features while integrating multi-scale information
-from the encoder.
+This module implements a powerful decoder that balances parameter capacity and efficiency.
+With selective optimization, it allocates more parameters and computation to critical 
+restoration components while maintaining efficiency in less important areas. Designed for
+HPC training with high GPU memory availability.
 
 Key components:
-- ChannelCompression: Reduces channel dimensions while preserving information
-- ResolutionAligner: Aligns features from different scales for fusion
-- AdaptiveCSABlock: Cross-Scale Attention with dynamic window sizes
-- UpsampleBlock: Various upsampling strategies (transposed conv, pixel shuffle)
-- MuralDecoderModule: Complete decoder implementation
-
-Architecture flow:
-1. Compress deep features from encoder
-2. Process through 4 progressive decoder stages with skip connections
-3. Apply content and pigment-aware attention mechanisms
-4. Output high-fidelity restored mural image
+- EnhancedChannelCompression: Flexible channel processing with residual options
+- PowerfulCrossAttention: Enhanced cross-attention with increased capacity
+- HybridWindowAttention: Optimized window attention with selective computation
+- UpsampleBlockHD: High-definition upsampling with advanced refinement
+- HighPerformanceDecoderModule: Enhanced decoder with optimized parameter allocation
 
 Usage:
     # Initialize with dimensions matching the encoder
-    decoder = MuralDecoderModule(encoder_dims={
+    decoder = HighPerformanceDecoderModule(encoder_dims={
         'stage1': 96, 'stage2': 192, 'stage3': 384, 'stage4': 768
     })
     
@@ -35,35 +29,80 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 import math
 
-class ChannelCompression(nn.Module):
+
+def get_dynamic_window_size(resolution: Tuple[int, int]) -> int:
     """
-    Compresses feature channels while preserving important information.
+    Calculate appropriate window size based on feature resolution.
     
-    This module reduces the number of channels using a combination of
-    1×1 convolution and instance normalization to maintain feature distinctiveness.
+    Args:
+        resolution (Tuple[int, int]): Feature map height and width
+    
+    Returns:
+        int: Calculated window size
+    """
+    # Larger windows for smaller resolutions, smaller windows for larger resolutions
+    avg_size = (resolution[0] + resolution[1]) // 2
+    
+    if avg_size <= 8:
+        return 8  # For smallest features (8×8)
+    elif avg_size <= 16:
+        return 6  # For medium-small features (16×16)
+    elif avg_size <= 32:
+        return 4  # For medium features (32×32)
+    else:
+        return 2  # For larger features (64×64 or higher)
+
+
+class EnhancedChannelCompression(nn.Module):
+    """
+    Enhanced channel compression with flexible capacity options.
+    
+    This module provides options for simple compression or enhanced
+    processing depending on the importance of the features.
     
     Attributes:
         in_channels (int): Number of input channels
         out_channels (int): Number of output channels
-        use_activation (bool): Whether to apply activation after compression
+        enhanced (bool): Whether to use enhanced processing
     """
     
-    def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
+    def __init__(
+        self, 
+        in_channels: int, 
+        out_channels: int, 
+        enhanced: bool = False, 
+        use_residual: bool = True
+    ):
         """
-        Initialize the channel compression module.
+        Initialize the enhanced channel compression.
         
         Args:
             in_channels (int): Number of input channels
             out_channels (int): Number of output channels
-            use_activation (bool): Whether to apply ReLU activation
+            enhanced (bool): Whether to use enhanced processing
+            use_residual (bool): Whether to use residual connections
         """
-        super(ChannelCompression, self).__init__()
+        super(EnhancedChannelCompression, self).__init__()
         
-        self.compress = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            nn.InstanceNorm2d(out_channels, affine=True),
-            nn.ReLU(inplace=True) if use_activation else nn.Identity()
-        )
+        self.use_residual = use_residual and in_channels == out_channels
+        
+        if enhanced:
+            # High-capacity version for important features
+            self.compress = nn.Sequential(
+                nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels),
+                nn.Conv2d(in_channels, in_channels * 2, kernel_size=1),
+                nn.InstanceNorm2d(in_channels * 2),
+                nn.GELU(),
+                nn.Conv2d(in_channels * 2, out_channels, kernel_size=1),
+                nn.InstanceNorm2d(out_channels)
+            )
+        else:
+            # Memory-efficient version for less important features
+            self.compress = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.InstanceNorm2d(out_channels),
+                nn.ReLU(inplace=True)
+            )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -75,26 +114,121 @@ class ChannelCompression(nn.Module):
         Returns:
             torch.Tensor: Compressed features [B, out_channels, H, W]
         """
-        return self.compress(x)
+        out = self.compress(x)
+        if self.use_residual:
+            return out + x
+        return out
+
+
+class SkipFusion(nn.Module):
+    """
+    Enhanced skip connection with adaptive concatenation and convolution.
+    
+    This module improves feature fusion by concatenating decoder features
+    with aligned encoder features, using advanced fusion techniques.
+    
+    Attributes:
+        decoder_channels (int): Number of decoder feature channels
+        encoder_channels (int): Number of encoder feature channels
+        out_channels (int): Number of output channels
+        enhanced (bool): Whether to use enhanced fusion
+    """
+    
+    def __init__(
+        self, 
+        decoder_channels: int, 
+        encoder_channels: int, 
+        out_channels: int,
+        enhanced: bool = False
+    ):
+        """
+        Initialize the skip fusion module.
+        
+        Args:
+            decoder_channels (int): Number of decoder feature channels
+            encoder_channels (int): Number of encoder feature channels
+            out_channels (int): Number of output channels
+            enhanced (bool): Whether to use enhanced fusion
+        """
+        super(SkipFusion, self).__init__()
+        
+        if enhanced:
+            # Enhanced version for important skip connections
+            self.encoder_adapt = nn.Sequential(
+                nn.Conv2d(encoder_channels, encoder_channels, kernel_size=3, padding=1),
+                nn.InstanceNorm2d(encoder_channels),
+                nn.GELU()
+            )
+            
+            self.fusion = nn.Sequential(
+                nn.Conv2d(decoder_channels + encoder_channels, out_channels * 2, kernel_size=1),
+                nn.InstanceNorm2d(out_channels * 2),
+                nn.GELU(),
+                nn.Conv2d(out_channels * 2, out_channels, kernel_size=3, padding=1),
+                nn.InstanceNorm2d(out_channels),
+                nn.GELU()
+            )
+        else:
+            # Memory-efficient version for less important skip connections
+            self.encoder_adapt = nn.Identity()
+            
+            self.fusion = nn.Sequential(
+                nn.Conv2d(decoder_channels + encoder_channels, out_channels, kernel_size=1),
+                nn.InstanceNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            )
+    
+    def forward(self, decoder_feat: torch.Tensor, encoder_feat: torch.Tensor) -> torch.Tensor:
+        """
+        Fuse decoder and encoder features.
+        
+        Args:
+            decoder_feat (torch.Tensor): Decoder features [B, decoder_channels, H, W]
+            encoder_feat (torch.Tensor): Encoder features [B, encoder_channels, H', W']
+            
+        Returns:
+            torch.Tensor: Fused features [B, out_channels, H, W]
+        """
+        # Process encoder features
+        encoder_feat = self.encoder_adapt(encoder_feat)
+        
+        # Align encoder features to decoder resolution
+        if decoder_feat.shape[2:] != encoder_feat.shape[2:]:
+            aligned_encoder = F.interpolate(
+                encoder_feat, 
+                size=decoder_feat.shape[2:], 
+                mode='bilinear', 
+                align_corners=False
+            )
+        else:
+            aligned_encoder = encoder_feat
+        
+        # Concatenate and fuse
+        concat_features = torch.cat([decoder_feat, aligned_encoder], dim=1)
+        fused_features = self.fusion(concat_features)
+        
+        return fused_features
 
 
 class ResolutionAligner(nn.Module):
     """
-    Aligns and fuses features from different resolutions.
+    Aligns and fuses features from different resolutions with selective enhancement.
     
     This module handles multiple input features at different resolutions,
-    aligning them to a target resolution and channel dimension before fusion.
+    with options for enhanced processing on important features.
     
     Attributes:
         target_channels (int): Target number of output channels
         target_size (Tuple[int, int]): Target spatial dimensions (H, W)
+        enhanced (bool): Whether to use enhanced fusion
     """
     
     def __init__(
         self, 
         input_dims: Dict[str, int],
         target_channels: int,
-        target_size: Tuple[int, int]
+        target_size: Tuple[int, int],
+        enhanced: bool = False
     ):
         """
         Initialize the resolution aligner.
@@ -103,24 +237,47 @@ class ResolutionAligner(nn.Module):
             input_dims (Dict[str, int]): Dictionary mapping feature names to channel dimensions
             target_channels (int): Target number of output channels
             target_size (Tuple[int, int]): Target output resolution (H, W)
+            enhanced (bool): Whether to use enhanced processing
         """
         super(ResolutionAligner, self).__init__()
         
         self.target_channels = target_channels
         self.target_size = target_size
         
-        # Create channel compression modules for each input
-        self.compressions = nn.ModuleDict({
-            name: ChannelCompression(dims, target_channels)
-            for name, dims in input_dims.items()
-        })
+        # Create channel compression modules for each input,
+        # with enhanced processing for specific features
+        self.compressions = nn.ModuleDict()
+        for name, dims in input_dims.items():
+            # Use enhanced processing for deep features (typically more important)
+            use_enhanced = enhanced and ('stage3' in name or 'stage4' in name or 'mid' in name)
+            self.compressions[name] = EnhancedChannelCompression(
+                dims, target_channels, enhanced=use_enhanced
+            )
         
-        # Fusion convolution to combine aligned features
-        self.fusion = nn.Sequential(
-            nn.Conv2d(target_channels * len(input_dims), target_channels, kernel_size=1),
-            nn.InstanceNorm2d(target_channels),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
+        # Fusion module with capacity based on importance
+        if enhanced:
+            # Enhanced fusion for important aligners
+            self.fusion = nn.Sequential(
+                nn.Conv2d(target_channels * len(input_dims), target_channels * 2, kernel_size=1),
+                nn.InstanceNorm2d(target_channels * 2),
+                nn.GELU(),
+                nn.Conv2d(target_channels * 2, target_channels, kernel_size=3, padding=1),
+                nn.InstanceNorm2d(target_channels),
+                nn.GELU()
+            )
+        else:
+            # Memory-efficient fusion for less important aligners
+            num_groups = min(4, len(input_dims))
+            self.fusion = nn.Sequential(
+                nn.Conv2d(
+                    target_channels * len(input_dims), 
+                    target_channels, 
+                    kernel_size=1, 
+                    groups=num_groups
+                ),
+                nn.InstanceNorm2d(target_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            )
     
     def forward(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -153,20 +310,18 @@ class ResolutionAligner(nn.Module):
         return x
 
 
-class WindowAttention(nn.Module):
+class HybridWindowAttention(nn.Module):
     """
-    Window-based multi-head self-attention module with relative position encoding.
+    Hybrid window-based multi-head self-attention with selective optimization.
     
-    This is a modified version of the attention mechanism from the Swin Transformer,
-    adapted for the specific needs of mural restoration with dynamic window sizes.
+    This module provides options for high-capacity or memory-efficient attention
+    depending on the importance of the feature level.
     
     Attributes:
         dim (int): Input feature dimension
         window_size (int): Size of the attention window
         num_heads (int): Number of attention heads
-        qkv (nn.Linear): Linear projection for query, key, value
-        proj (nn.Linear): Linear projection for output
-        relative_position_bias_table (nn.Parameter): Relative position bias parameters
+        enhanced (bool): Whether to use enhanced attention
     """
     
     def __init__(
@@ -174,25 +329,28 @@ class WindowAttention(nn.Module):
         dim: int, 
         window_size: int,
         num_heads: int,
+        enhanced: bool = False,
         qkv_bias: bool = True,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0
     ):
         """
-        Initialize window attention module.
+        Initialize hybrid window attention module.
         
         Args:
             dim (int): Input feature dimension
             window_size (int): Size of the attention window
             num_heads (int): Number of attention heads
+            enhanced (bool): Whether to use enhanced attention
             qkv_bias (bool): Whether to use bias in QKV projection
             attn_drop (float): Dropout rate for attention matrix
             proj_drop (float): Dropout rate for output projection
         """
-        super(WindowAttention, self).__init__()
+        super(HybridWindowAttention, self).__init__()
         self.dim = dim
         self.window_size = window_size  
         self.num_heads = num_heads
+        self.enhanced = enhanced
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
@@ -204,23 +362,42 @@ class WindowAttention(nn.Module):
         # Get pair-wise relative position index
         coords_h = torch.arange(self.window_size)
         coords_w = torch.arange(self.window_size)
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # [2, window_size, window_size]
-        coords_flatten = torch.flatten(coords, 1)  # [2, window_size*window_size]
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
+        coords_flatten = torch.flatten(coords, 1)
         
         # Calculate relative positions
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # [2, Wh*Ww, Wh*Ww]
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # [Wh*Ww, Wh*Ww, 2]
-        relative_coords[:, :, 0] += self.window_size - 1  # shift to start from 0
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+        relative_coords[:, :, 0] += self.window_size - 1
         relative_coords[:, :, 1] += self.window_size - 1
         relative_coords[:, :, 0] *= 2 * self.window_size - 1
-        relative_position_index = relative_coords.sum(-1)  # [Wh*Ww, Wh*Ww]
+        relative_position_index = relative_coords.sum(-1)
         self.register_buffer("relative_position_index", relative_position_index)
         
-        # Projections for query, key, value and output
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        # Enhanced attention for important layers
+        if enhanced:
+            # Higher capacity QKV projection with more expressive power
+            self.qkv = nn.Sequential(
+                nn.Linear(dim, dim * 2, bias=qkv_bias),
+                nn.LayerNorm(dim * 2),
+                nn.GELU(),
+                nn.Linear(dim * 2, dim * 3, bias=qkv_bias)
+            )
+            # Powerful output projection
+            self.proj = nn.Sequential(
+                nn.Linear(dim, dim * 2),
+                nn.LayerNorm(dim * 2),
+                nn.GELU(),
+                nn.Linear(dim * 2, dim),
+                nn.Dropout(proj_drop)
+            )
+        else:
+            # Basic efficient implementation for less important layers
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+            self.proj = nn.Linear(dim, dim)
+            self.proj_drop = nn.Dropout(proj_drop)
+        
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
         
         # Initialize relative position bias table
         nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
@@ -231,7 +408,7 @@ class WindowAttention(nn.Module):
         
         Args:
             x (torch.Tensor): Input features with shape [num_windows*B, window_size*window_size, C]
-            mask (Optional[torch.Tensor]): Attention mask with shape [num_windows, window_size*window_size, window_size*window_size]
+            mask (Optional[torch.Tensor]): Attention mask
                 
         Returns:
             torch.Tensor: Attention output with shape [num_windows*B, window_size*window_size, C]
@@ -239,18 +416,24 @@ class WindowAttention(nn.Module):
         B_, N, C = x.shape
         
         # Project query, key, value
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # [B_, num_heads, N, C//num_heads]
+        qkv = self.qkv(x)
+        if self.enhanced:
+            # QKV already properly shaped from sequential module
+            qkv = qkv.reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        else:
+            qkv = qkv.reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        
+        q, k, v = qkv[0], qkv[1], qkv[2]
         
         # Compute attention
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))  # [B_, num_heads, N, N]
+        attn = (q @ k.transpose(-2, -1))
         
         # Apply relative position bias
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size * self.window_size, self.window_size * self.window_size, -1
-        )  # [window_size*window_size, window_size*window_size, num_heads]
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # [num_heads, window_size*window_size, window_size*window_size]
+        )
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
         attn = attn + relative_position_bias.unsqueeze(0)
         
         # Apply mask if provided
@@ -267,128 +450,133 @@ class WindowAttention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         
         # Project back to original dimension
-        x = self.proj(x)
-        x = self.proj_drop(x)
+        if self.enhanced:
+            x = self.proj(x)  # Enhanced projection has its own dropout
+        else:
+            x = self.proj(x)
+            x = self.proj_drop(x)
         
         return x
 
 
-class AdaptiveCSABlock(nn.Module):
+class PowerfulCrossAttention(nn.Module):
     """
-    Adaptive Cross-Scale Attention Block with dynamic window size.
+    High-capacity Cross-Scale Attention Block.
     
-    This block implements self-attention within windows, with the window size
-    adapted to the feature resolution. It also includes a gating mechanism
-    to control feature flow and a feed-forward network for transformation.
+    This block implements self-attention within windows with options
+    for enhanced processing on important features.
     
     Attributes:
         dim (int): Input feature dimension
-        window_size (int): Size of attention window
         num_heads (int): Number of attention heads
         mlp_ratio (float): Ratio of MLP hidden dimension to input dimension
+        enhanced (bool): Whether to use enhanced processing
     """
     
     def __init__(
         self,
         dim: int,
-        window_size: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
+        enhanced: bool = False,
         qkv_bias: bool = True,
         drop: float = 0.0,
-        attn_drop: float = 0.0,
-        content_aware: bool = False
+        attn_drop: float = 0.0
     ):
         """
-        Initialize the adaptive CSA block.
+        Initialize the powerful cross attention block.
         
         Args:
             dim (int): Input feature dimension
-            window_size (int): Size of attention window
             num_heads (int): Number of attention heads
             mlp_ratio (float): Ratio of MLP hidden dimension to input dimension
+            enhanced (bool): Whether to use enhanced processing
             qkv_bias (bool): Whether to use bias in attention QKV projection
             drop (float): Dropout rate for MLP
             attn_drop (float): Dropout rate for attention
-            content_aware (bool): Whether to use content-aware gating
         """
-        super(AdaptiveCSABlock, self).__init__()
+        super(PowerfulCrossAttention, self).__init__()
         
-        # Normalization and attention layers
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = WindowAttention(
-            dim=dim,
-            window_size=window_size,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            attn_drop=attn_drop,
-            proj_drop=drop
-        )
+        # Layer normalization with conditional enhancement
+        if enhanced:
+            self.norm1 = nn.LayerNorm(dim, eps=1e-6)
+            self.norm2 = nn.LayerNorm(dim, eps=1e-6)
+        else:
+            self.norm1 = nn.LayerNorm(dim)
+            self.norm2 = nn.LayerNorm(dim)
         
-        # Feed-forward network
-        self.norm2 = nn.LayerNorm(dim)
+        # Enhanced MLP with more capacity for important layers
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(drop),
-            nn.Linear(mlp_hidden_dim, dim),
-            nn.Dropout(drop)
-        )
-        
-        # Content-aware gating mechanism (optional)
-        self.content_aware = content_aware
-        if content_aware:
-            self.gate = nn.Sequential(
-                nn.Linear(dim, dim),
-                nn.Sigmoid()
+        if enhanced:
+            self.mlp = nn.Sequential(
+                nn.Linear(dim, mlp_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(drop),
+                nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(drop),
+                nn.Linear(mlp_hidden_dim, dim),
+                nn.Dropout(drop)
+            )
+        else:
+            self.mlp = nn.Sequential(
+                nn.Linear(dim, mlp_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(drop),
+                nn.Linear(mlp_hidden_dim, dim),
+                nn.Dropout(drop)
             )
         
-        # Window size and input dimension
-        self.window_size = window_size
+        # Store parameters for dynamic window attention
         self.dim = dim
+        self.num_heads = num_heads
+        self.qkv_bias = qkv_bias
+        self.attn_drop = attn_drop
+        self.proj_drop = drop
+        self.enhanced = enhanced
     
-    def _window_partition(self, x: torch.Tensor) -> torch.Tensor:
+    def _window_partition(self, x: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple]:
         """
         Partition input feature into windows.
         
         Args:
             x (torch.Tensor): Input feature of shape [B, H, W, C]
+            window_size (int): Window size
             
         Returns:
-            torch.Tensor: Windows of shape [num_windows*B, window_size, window_size, C]
+            Tuple[torch.Tensor, Tuple]: Windows and padding info
         """
         B, H, W, C = x.shape
         
         # Pad features if needed to ensure divisibility by window_size
-        pad_h = (self.window_size - H % self.window_size) % self.window_size
-        pad_w = (self.window_size - W % self.window_size) % self.window_size
+        pad_h = (window_size - H % window_size) % window_size
+        pad_w = (window_size - W % window_size) % window_size
         if pad_h > 0 or pad_w > 0:
             x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
             H, W = H + pad_h, W + pad_w
         
         # Reshape into windows
-        x = x.view(B, H // self.window_size, self.window_size, W // self.window_size, self.window_size, C)
-        windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size * self.window_size, C)
+        x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+        windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size * window_size, C)
         
         return windows, (H, W, pad_h, pad_w)
     
-    def _window_reverse(self, windows: torch.Tensor, H: int, W: int, pad_h: int, pad_w: int) -> torch.Tensor:
+    def _window_reverse(
+        self, windows: torch.Tensor, window_size: int, H: int, W: int, pad_h: int, pad_w: int
+    ) -> torch.Tensor:
         """
         Reverse window partitioning.
         
         Args:
             windows (torch.Tensor): Windows of shape [num_windows*B, window_size*window_size, C]
-            H (int): Padded height
-            W (int): Padded width
-            pad_h (int): Padding height
-            pad_w (int): Padding width
+            window_size (int): Window size
+            H, W, pad_h, pad_w: Size and padding information
             
         Returns:
             torch.Tensor: Reversed feature of shape [B, H-pad_h, W-pad_w, C]
         """
-        B = int(windows.shape[0] / ((H // self.window_size) * (W // self.window_size)))
-        x = windows.view(B, H // self.window_size, W // self.window_size, self.window_size, self.window_size, -1)
+        B = int(windows.shape[0] / ((H // window_size) * (W // window_size)))
+        x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
         
         # Remove padding if needed
@@ -399,7 +587,7 @@ class AdaptiveCSABlock(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the CSA block.
+        Forward pass through the cross attention block with dynamic window size.
         
         Args:
             x (torch.Tensor): Input feature of shape [B, C, H, W]
@@ -413,17 +601,26 @@ class AdaptiveCSABlock(nn.Module):
         # Change from BCHW to BHWC for window attention
         x = x.permute(0, 2, 3, 1).contiguous()  # [B, H, W, C]
         
+        # Compute dynamic window size based on feature resolution
+        window_size = get_dynamic_window_size((H, W))
+        
         # Apply window attention
         x_norm = self.norm1(x)
-        windows, (H_pad, W_pad, pad_h, pad_w) = self._window_partition(x_norm)
-        attn_windows = self.attn(windows)
-        x_attn = self._window_reverse(attn_windows, H_pad, W_pad, pad_h, pad_w)
+        windows, (H_pad, W_pad, pad_h, pad_w) = self._window_partition(x_norm, window_size)
         
-        # Content-aware gating (if enabled)
-        if self.content_aware:
-            # Compute content-aware gate
-            gate_value = self.gate(x_norm.reshape(-1, C)).view(B, H, W, C)
-            x_attn = x_attn * gate_value
+        # Create window attention dynamically based on resolution
+        window_attn = HybridWindowAttention(
+            dim=self.dim,
+            window_size=window_size,
+            num_heads=self.num_heads,
+            enhanced=self.enhanced,
+            qkv_bias=self.qkv_bias,
+            attn_drop=self.attn_drop,
+            proj_drop=self.proj_drop
+        ).to(x.device)
+        
+        attn_windows = window_attn(windows)
+        x_attn = self._window_reverse(attn_windows, window_size, H_pad, W_pad, pad_h, pad_w)
         
         # First residual connection
         x = x + x_attn
@@ -437,18 +634,19 @@ class AdaptiveCSABlock(nn.Module):
         return x
 
 
-class UpsampleBlock(nn.Module):
+class UpsampleBlockHD(nn.Module):
     """
-    Upsampling block with multiple upsampling strategies.
+    High-definition upsampling block with advanced refinement.
     
-    This module handles upsampling of feature maps using either transposed convolution
-    or pixel shuffle, with appropriate normalization and activation.
+    This module provides options for enhanced upsampling with
+    greater capacity for important feature levels.
     
     Attributes:
         in_channels (int): Number of input channels
         out_channels (int): Number of output channels
         scale_factor (int): Upsampling scale factor
-        mode (str): Upsampling mode ('transpose_conv' or 'pixel_shuffle')
+        mode (str): Upsampling mode
+        enhanced (bool): Whether to use enhanced processing
     """
     
     def __init__(
@@ -456,427 +654,335 @@ class UpsampleBlock(nn.Module):
         in_channels: int,
         out_channels: int,
         scale_factor: int = 2,
-        mode: str = 'pixel_shuffle'
+        mode: str = 'pixel_shuffle',
+        enhanced: bool = False
     ):
         """
-        Initialize the upsampling block.
+        Initialize the HD upsampling block.
         
         Args:
             in_channels (int): Number of input channels
             out_channels (int): Number of output channels
             scale_factor (int): Upsampling scale factor
-            mode (str): Upsampling mode ('transpose_conv' or 'pixel_shuffle')
+            mode (str): Upsampling mode ('transpose_conv', 'pixel_shuffle', or 'learned_pixel_shuffle')
+            enhanced (bool): Whether to use enhanced processing
         """
-        super(UpsampleBlock, self).__init__()
+        super(UpsampleBlockHD, self).__init__()
         
         self.mode = mode
+        self.enhanced = enhanced
         
-        if mode == 'transpose_conv':
-            # Transposed convolution for upsampling
-            self.upsample = nn.Sequential(
-                nn.ConvTranspose2d(
-                    in_channels, out_channels, 
-                    kernel_size=3, stride=scale_factor, padding=1, output_padding=1
-                ),
+        # Enhanced upsampling for important layers
+        if enhanced:
+            if mode == 'transpose_conv':
+                # Enhanced transposed convolution
+                self.upsample = nn.Sequential(
+                    nn.ConvTranspose2d(
+                        in_channels, in_channels, 
+                        kernel_size=3, stride=scale_factor, padding=1, output_padding=1
+                    ),
+                    nn.InstanceNorm2d(in_channels),
+                    nn.GELU(),
+                    nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+                    nn.InstanceNorm2d(out_channels),
+                    nn.GELU()
+                )
+            elif mode == 'pixel_shuffle':
+                # Enhanced pixel shuffle
+                self.upsample = nn.Sequential(
+                    nn.Conv2d(
+                        in_channels, out_channels * scale_factor * scale_factor * 2, 
+                        kernel_size=3, padding=1
+                    ),
+                    nn.PixelShuffle(scale_factor),
+                    nn.InstanceNorm2d(out_channels * 2),
+                    nn.GELU(),
+                    nn.Conv2d(out_channels * 2, out_channels, kernel_size=3, padding=1),
+                    nn.InstanceNorm2d(out_channels),
+                    nn.GELU()
+                )
+            elif mode == 'learned_pixel_shuffle':
+                # Enhanced learned pixel shuffle
+                self.upsample = nn.Sequential(
+                    nn.Conv2d(
+                        in_channels, out_channels * scale_factor * scale_factor * 2, 
+                        kernel_size=3, padding=1
+                    ),
+                    nn.PixelShuffle(scale_factor),
+                    nn.Conv2d(out_channels * 2, out_channels * 2, kernel_size=3, padding=1),
+                    nn.InstanceNorm2d(out_channels * 2),
+                    nn.GELU(),
+                    nn.Conv2d(out_channels * 2, out_channels, kernel_size=3, padding=1),
+                    nn.InstanceNorm2d(out_channels),
+                    nn.GELU()
+                )
+            else:
+                raise ValueError(f"Unsupported upsampling mode: {mode}")
+            
+            # Enhanced refinement for important layers
+            self.refine = nn.Sequential(
+                nn.Conv2d(out_channels, out_channels * 2, kernel_size=3, padding=1),
+                nn.InstanceNorm2d(out_channels * 2),
+                nn.GELU(),
+                nn.Conv2d(out_channels * 2, out_channels, kernel_size=3, padding=1),
                 nn.InstanceNorm2d(out_channels),
-                nn.LeakyReLU(0.2, inplace=True)
-            )
-        elif mode == 'pixel_shuffle':
-            # Pixel shuffle for upsampling
-            self.upsample = nn.Sequential(
-                nn.Conv2d(
-                    in_channels, out_channels * scale_factor * scale_factor, 
-                    kernel_size=3, padding=1
-                ),
-                nn.PixelShuffle(scale_factor),
-                nn.InstanceNorm2d(out_channels),
-                nn.LeakyReLU(0.2, inplace=True)
-            )
-        elif mode == 'learned_pixel_shuffle':
-            # Learned pixel shuffle with additional conv
-            self.upsample = nn.Sequential(
-                nn.Conv2d(
-                    in_channels, out_channels * scale_factor * scale_factor, 
-                    kernel_size=3, padding=1
-                ),
-                nn.PixelShuffle(scale_factor),
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-                nn.InstanceNorm2d(out_channels),
-                nn.LeakyReLU(0.2, inplace=True)
+                nn.GELU()
             )
         else:
-            raise ValueError(f"Unsupported upsampling mode: {mode}")
+            # Basic upsampling for less important layers
+            if mode == 'transpose_conv':
+                self.upsample = nn.Sequential(
+                    nn.ConvTranspose2d(
+                        in_channels, out_channels, 
+                        kernel_size=3, stride=scale_factor, padding=1, output_padding=1
+                    ),
+                    nn.InstanceNorm2d(out_channels),
+                    nn.LeakyReLU(0.2, inplace=True)
+                )
+            elif mode == 'pixel_shuffle':
+                self.upsample = nn.Sequential(
+                    nn.Conv2d(
+                        in_channels, out_channels * scale_factor * scale_factor, 
+                        kernel_size=3, padding=1
+                    ),
+                    nn.PixelShuffle(scale_factor),
+                    nn.InstanceNorm2d(out_channels),
+                    nn.LeakyReLU(0.2, inplace=True)
+                )
+            elif mode == 'learned_pixel_shuffle':
+                self.upsample = nn.Sequential(
+                    nn.Conv2d(
+                        in_channels, out_channels * scale_factor * scale_factor, 
+                        kernel_size=3, padding=1
+                    ),
+                    nn.PixelShuffle(scale_factor),
+                    nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+                    nn.InstanceNorm2d(out_channels),
+                    nn.LeakyReLU(0.2, inplace=True)
+                )
+            else:
+                raise ValueError(f"Unsupported upsampling mode: {mode}")
+            
+            # Efficient refinement for less important layers
+            self.refine = nn.Sequential(
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, groups=out_channels),
+                nn.Conv2d(out_channels, out_channels, kernel_size=1),
+                nn.InstanceNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Upsample the input feature map.
+        Upsample the input feature map with advanced refinement.
         
         Args:
             x (torch.Tensor): Input feature map [B, in_channels, H, W]
             
         Returns:
-            torch.Tensor: Upsampled feature map [B, out_channels, H*scale_factor, W*scale_factor]
+            torch.Tensor: Upsampled and refined feature map [B, out_channels, H*scale_factor, W*scale_factor]
         """
-        return self.upsample(x)
+        # Upsample
+        x = self.upsample(x)
+        
+        # Apply refinement with residual connection
+        return x + self.refine(x)
 
 
-class PigmentAwareCSA(nn.Module):
+class HighPerformanceDecoderModule(nn.Module):
     """
-    Specialized Cross-Scale Attention block for pigment-specific processing.
+    High-performance decoder module for Dun Huang Mural restoration.
     
-    This module is designed to handle the unique characteristics of ancient mural pigments
-    using depthwise separable convolutions and specialized attention mechanisms.
-    
-    Attributes:
-        dim (int): Input feature dimension
-        window_size (int): Size of attention window
-        num_heads (int): Number of attention heads
-        groups (int): Number of groups for depthwise convolution
-    """
-    
-    def __init__(
-        self,
-        dim: int,
-        window_size: int,
-        num_heads: int,
-        groups: int = 4,
-        drop: float = 0.0
-    ):
-        """
-        Initialize the pigment-aware CSA block.
-        
-        Args:
-            dim (int): Input feature dimension
-            window_size (int): Size of attention window
-            num_heads (int): Number of attention heads
-            groups (int): Number of groups for depthwise convolution
-            drop (float): Dropout rate
-        """
-        super(PigmentAwareCSA, self).__init__()
-        
-        # Depthwise separable convolution
-        self.depthwise = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=groups)
-        self.pointwise = nn.Conv2d(dim, dim, kernel_size=1)
-        
-        # Windowed attention with smaller dimension
-        reduced_dim = dim // 2
-        self.compress = nn.Conv2d(dim, reduced_dim, kernel_size=1)
-        self.norm = nn.LayerNorm(reduced_dim)
-        self.window_attn = WindowAttention(
-            dim=reduced_dim,
-            window_size=window_size,
-            num_heads=num_heads,
-            qkv_bias=True,
-            attn_drop=drop,
-            proj_drop=drop
-        )
-        self.expand = nn.Conv2d(reduced_dim, dim, kernel_size=1)
-        
-        # Pigment-specific processing
-        self.pigment_gate = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # Final processing
-        self.final = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(dim),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
-        
-        # Store dimensions
-        self.dim = dim
-        self.window_size = window_size
-    
-    def _window_partition(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple]:
-        """
-        Partition input feature into windows (simplified version).
-        
-        Args:
-            x (torch.Tensor): Input feature of shape [B, H, W, C]
-            
-        Returns:
-            Tuple[torch.Tensor, Tuple]: Windows and padding information
-        """
-        B, H, W, C = x.shape
-        
-        # Pad features if needed
-        pad_h = (self.window_size - H % self.window_size) % self.window_size
-        pad_w = (self.window_size - W % self.window_size) % self.window_size
-        if pad_h > 0 or pad_w > 0:
-            x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
-            H, W = H + pad_h, W + pad_w
-        
-        # Reshape into windows
-        x = x.view(B, H // self.window_size, self.window_size, W // self.window_size, self.window_size, C)
-        windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size * self.window_size, C)
-        
-        return windows, (H, W, pad_h, pad_w)
-    
-    def _window_reverse(self, windows: torch.Tensor, H: int, W: int, pad_h: int, pad_w: int) -> torch.Tensor:
-        """
-        Reverse window partitioning (simplified version).
-        
-        Args:
-            windows (torch.Tensor): Windows of shape [num_windows*B, window_size*window_size, C]
-            H, W, pad_h, pad_w: Size and padding information
-            
-        Returns:
-            torch.Tensor: Reversed feature of shape [B, H-pad_h, W-pad_w, C]
-        """
-        B = int(windows.shape[0] / ((H // self.window_size) * (W // self.window_size)))
-        x = windows.view(B, H // self.window_size, W // self.window_size, self.window_size, self.window_size, -1)
-        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
-        
-        if pad_h > 0 or pad_w > 0:
-            x = x[:, :H-pad_h, :W-pad_w, :]
-            
-        return x
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the pigment-aware CSA block.
-        
-        Args:
-            x (torch.Tensor): Input feature of shape [B, C, H, W]
-            
-        Returns:
-            torch.Tensor: Processed feature of shape [B, C, H, W]
-        """
-        B, C, H, W = x.shape
-        shortcut = x
-        
-        # Depthwise separable convolution path
-        depthwise_features = self.pointwise(self.depthwise(x))
-        
-        # Window attention path with dimension reduction
-        x_reduced = self.compress(x)
-        x_reduced = x_reduced.permute(0, 2, 3, 1).contiguous()  # [B, H, W, C//2]
-        x_reduced = self.norm(x_reduced)
-        
-        # Apply windowed attention
-        windows, (H_pad, W_pad, pad_h, pad_w) = self._window_partition(x_reduced)
-        attn_windows = self.window_attn(windows)
-        x_attn = self._window_reverse(attn_windows, H_pad, W_pad, pad_h, pad_w)
-        
-        # Back to BCHW format and expand channels
-        x_attn = x_attn.permute(0, 3, 1, 2).contiguous()
-        x_attn = self.expand(x_attn)
-        
-        # Pigment-specific gating
-        gate = self.pigment_gate(x)
-        x_gated = x_attn * gate + depthwise_features * (1 - gate)
-        
-        # Add residual and apply final processing
-        x = shortcut + x_gated
-        x = self.final(x)
-        
-        return x
-
-
-class CulturalElementAttention(nn.Module):
-    """
-    Specialized attention module for cultural elements in murals.
-    
-    This module enhances attention to culturally significant details like
-    faces, religious symbols, and narrative elements in the mural.
-    
-    Attributes:
-        channels (int): Number of input channels
-        reduction (int): Channel reduction factor for attention
-        kernel_size (int): Size of spatial attention kernel
-    """
-    
-    def __init__(
-        self,
-        channels: int,
-        reduction: int = 8,
-        kernel_size: int = 7
-    ):
-        """
-        Initialize the cultural element attention module.
-        
-        Args:
-            channels (int): Number of input channels
-            reduction (int): Channel reduction factor for attention
-            kernel_size (int): Size of spatial attention kernel
-        """
-        super(CulturalElementAttention, self).__init__()
-        
-        # Channel attention
-        self.channel_attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(channels, channels // reduction, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels // reduction, channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # Spatial attention
-        self.spatial_attention = nn.Sequential(
-            nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply cultural element attention to input features.
-        
-        Args:
-            x (torch.Tensor): Input feature map [B, C, H, W]
-            
-        Returns:
-            torch.Tensor: Attention-enhanced feature map [B, C, H, W]
-        """
-        # Apply channel attention
-        channel_attn = self.channel_attention(x)
-        x_channel = x * channel_attn
-        
-        # Apply spatial attention
-        avg_pool = torch.mean(x_channel, dim=1, keepdim=True)
-        max_pool, _ = torch.max(x_channel, dim=1, keepdim=True)
-        spatial_input = torch.cat([avg_pool, max_pool], dim=1)
-        spatial_attn = self.spatial_attention(spatial_input)
-        
-        return x_channel * spatial_attn
-
-
-class MuralDecoderModule(nn.Module):
-    """
-    Complete decoder module for Dun Huang Mural restoration.
-    
-    This module implements the full decoder architecture with multi-stage
-    upsampling, cross-scale attention, skip connections, and specialized
-    processing for mural-specific features.
+    This module implements a balanced decoder architecture that allocates
+    more parameters to critical components while maintaining efficiency
+    in less important areas. Designed for HPC training with high GPU memory.
     
     Attributes:
         encoder_dims (Dict[str, int]): Dimensions of encoder feature maps
         skip_connections (bool): Whether to use skip connections
-        use_dynamic_windows (bool): Whether to use dynamic window sizes
+        high_capacity_mode (str): Where to allocate more parameters ('early', 'deep', or 'balanced')
     """
     
     def __init__(
         self,
         encoder_dims: Dict[str, int],
         skip_connections: bool = True,
-        use_dynamic_windows: bool = True
+        high_capacity_mode: str = 'balanced'
     ):
         """
-        Initialize the mural decoder module.
+        Initialize the high-performance decoder module.
         
         Args:
             encoder_dims (Dict[str, int]): Dictionary mapping encoder stage names to channel dimensions
-            skip_connections (bool): Whether to use skip connections from encoder to decoder
-            use_dynamic_windows (bool): Whether to adapt window sizes based on feature resolution
+            skip_connections (bool): Whether to use enhanced skip connections
+            high_capacity_mode (str): Where to allocate more parameters:
+                - 'early': More parameters in early stages for fine details
+                - 'deep': More parameters in deep stages for semantic information
+                - 'balanced': Distributed parameter allocation
         """
-        super(MuralDecoderModule, self).__init__()
+        super(HighPerformanceDecoderModule, self).__init__()
         
         self.skip_connections = skip_connections
-        self.use_dynamic_windows = use_dynamic_windows
+        
+        # Determine which stages get enhanced processing
+        if high_capacity_mode == 'early':
+            enhance_stage1 = False
+            enhance_stage2 = False
+            enhance_stage3 = True
+            enhance_stage4 = True
+        elif high_capacity_mode == 'deep':
+            enhance_stage1 = True
+            enhance_stage2 = True
+            enhance_stage3 = False
+            enhance_stage4 = False
+        else:  # 'balanced'
+            enhance_stage1 = True
+            enhance_stage2 = False
+            enhance_stage3 = False
+            enhance_stage4 = True
         
         # Store input dimensions for reference
         self.encoder_dims = encoder_dims
         
         # Channel compression for deep features
-        self.compress_stage3 = ChannelCompression(encoder_dims['stage3'], 256)
-        self.compress_stage4 = ChannelCompression(encoder_dims['stage4'], 256)
+        self.compress_stage3 = EnhancedChannelCompression(
+            encoder_dims['stage3'], 256, enhanced=enhance_stage1
+        )
+        self.compress_stage4 = EnhancedChannelCompression(
+            encoder_dims['stage4'], 256, enhanced=enhance_stage1
+        )
         
         # Stage 1: Process deepest features (8×8)
-        window_size_1 = 8 if use_dynamic_windows else 7
         self.stage1_ra = ResolutionAligner(
             input_dims={'stage3': 256, 'stage4': 256},
             target_channels=256,
-            target_size=(8, 8)
+            target_size=(8, 8),
+            enhanced=enhance_stage1
         )
-        self.stage1_csa = AdaptiveCSABlock(
+        self.stage1_csa = PowerfulCrossAttention(
             dim=256,
-            window_size=window_size_1,
             num_heads=8,
             mlp_ratio=4.0,
-            content_aware=True
+            enhanced=enhance_stage1
         )
-        self.stage1_up = UpsampleBlock(
+        self.stage1_up = UpsampleBlockHD(
             in_channels=256,
             out_channels=192,
             scale_factor=2,
-            mode='transpose_conv'
+            mode='transpose_conv',
+            enhanced=enhance_stage1
+        )
+        
+        # Skip fusion for stage 1
+        self.skip_fusion1 = SkipFusion(
+            decoder_channels=192,
+            encoder_channels=encoder_dims['stage4'],
+            out_channels=192,
+            enhanced=enhance_stage1
         )
         
         # Stage 2: Process mid-level features (16×16)
-        window_size_2 = 6 if use_dynamic_windows else 7
-        self.compress_stage2 = ChannelCompression(encoder_dims['stage2'], 128)
+        self.compress_stage2 = EnhancedChannelCompression(
+            encoder_dims['stage2'], 128, enhanced=enhance_stage2
+        )
         self.stage2_ra = ResolutionAligner(
             input_dims={'stage2': 128, 'stage3': 256, 'mid1': 192},
             target_channels=192,
-            target_size=(16, 16)
+            target_size=(16, 16),
+            enhanced=enhance_stage2
         )
-        self.stage2_csa = AdaptiveCSABlock(
+        self.stage2_csa = PowerfulCrossAttention(
             dim=192,
-            window_size=window_size_2,
-            num_heads=4,
-            content_aware=True
+            num_heads=6,
+            enhanced=enhance_stage2
         )
-        self.stage2_up = UpsampleBlock(
+        self.stage2_up = UpsampleBlockHD(
             in_channels=192,
             out_channels=96,
             scale_factor=2,
-            mode='pixel_shuffle'
+            mode='pixel_shuffle',
+            enhanced=enhance_stage2
+        )
+        
+        # Skip fusion for stage 2
+        self.skip_fusion2 = SkipFusion(
+            decoder_channels=96,
+            encoder_channels=encoder_dims['stage3'],
+            out_channels=96,
+            enhanced=enhance_stage2
         )
         
         # Stage 3: Process mid-to-early features (32×32)
-        window_size_3 = 4 if use_dynamic_windows else 7
         self.stage3_ra = ResolutionAligner(
             input_dims={'stage1': encoder_dims['stage1'], 'stage2': 128, 'mid2': 96},
             target_channels=96,
-            target_size=(32, 32)
+            target_size=(32, 32),
+            enhanced=enhance_stage3
         )
-        self.stage3_csa = PigmentAwareCSA(
+        self.stage3_csa = PowerfulCrossAttention(
             dim=96,
-            window_size=window_size_3,
             num_heads=4,
-            groups=4
+            enhanced=enhance_stage3
         )
-        self.stage3_up = UpsampleBlock(
+        self.stage3_up = UpsampleBlockHD(
             in_channels=96,
             out_channels=64,
             scale_factor=2,
-            mode='pixel_shuffle'
+            mode='pixel_shuffle',
+            enhanced=enhance_stage3
         )
         
-        # Stage 4: Process fine details (64×64)
-        window_size_4 = 2 if use_dynamic_windows else 5
-        self.cultural_attn = CulturalElementAttention(encoder_dims['stage1'])
+        # Skip fusion for stage 3
+        self.skip_fusion3 = SkipFusion(
+            decoder_channels=64,
+            encoder_channels=encoder_dims['stage2'],
+            out_channels=64,
+            enhanced=enhance_stage3
+        )
+        
+        # Stage 4: Process fine details (64×64 to 256×256)
         self.stage4_ra = ResolutionAligner(
-            input_dims={'stage1_cultural': encoder_dims['stage1'], 'mid3': 64},
+            input_dims={'stage1': encoder_dims['stage1'], 'mid3': 64},
             target_channels=64,
-            target_size=(64, 64)
+            target_size=(64, 64),
+            enhanced=enhance_stage4
         )
-        self.stage4_csa = AdaptiveCSABlock(
+        self.stage4_csa = PowerfulCrossAttention(
             dim=64,
-            window_size=window_size_4,
             num_heads=4,
-            mlp_ratio=2.0
+            mlp_ratio=2.0,
+            enhanced=enhance_stage4
         )
-        self.stage4_up = UpsampleBlock(
+        self.stage4_up = UpsampleBlockHD(
             in_channels=64,
             out_channels=32,
             scale_factor=4,
-            mode='learned_pixel_shuffle'
+            mode='learned_pixel_shuffle',
+            enhanced=enhance_stage4
         )
         
-        # Output projection
+        # Skip fusion for stage 4
+        self.skip_fusion4 = SkipFusion(
+            decoder_channels=32,
+            encoder_channels=encoder_dims['stage1'],
+            out_channels=32,
+            enhanced=enhance_stage4
+        )
+        
+        # Output projection with high capacity
         self.output_proj = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(64),
+            nn.GELU(),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.InstanceNorm2d(32),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.GELU(),
             nn.Conv2d(32, 3, kernel_size=3, padding=1),
-            nn.Tanh()
+            nn.Tanh()  # Standard range for initial restoration
         )
     
     def forward(self, encoder_features: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Forward pass through the decoder.
+        Forward pass through the high-performance decoder.
         
         Args:
             encoder_features (Dict[str, torch.Tensor]): Dictionary of encoder features
@@ -901,14 +1007,9 @@ class MuralDecoderModule(nn.Module):
         stage1_attn = self.stage1_csa(stage1_aligned)
         stage1_up = self.stage1_up(stage1_attn)
         
-        # Skip connection from stage4 if enabled
+        # Apply enhanced skip connection
         if self.skip_connections:
-            stage1_out = stage1_up + F.interpolate(
-                encoder_features['stage4'], 
-                size=stage1_up.shape[2:], 
-                mode='bilinear', 
-                align_corners=False
-            )
+            stage1_out = self.skip_fusion1(stage1_up, encoder_features['stage4'])
         else:
             stage1_out = stage1_up
         
@@ -923,14 +1024,9 @@ class MuralDecoderModule(nn.Module):
         stage2_attn = self.stage2_csa(stage2_aligned)
         stage2_up = self.stage2_up(stage2_attn)
         
-        # Skip connection from stage3 if enabled
+        # Apply enhanced skip connection
         if self.skip_connections:
-            stage2_out = stage2_up + F.interpolate(
-                encoder_features['stage3'], 
-                size=stage2_up.shape[2:], 
-                mode='bilinear', 
-                align_corners=False
-            )
+            stage2_out = self.skip_fusion2(stage2_up, encoder_features['stage3'])
         else:
             stage2_out = stage2_up
         
@@ -944,35 +1040,24 @@ class MuralDecoderModule(nn.Module):
         stage3_attn = self.stage3_csa(stage3_aligned)
         stage3_up = self.stage3_up(stage3_attn)
         
-        # Skip connection from stage2 if enabled
+        # Apply enhanced skip connection
         if self.skip_connections:
-            stage3_out = stage3_up + F.interpolate(
-                encoder_features['stage2'], 
-                size=stage3_up.shape[2:], 
-                mode='bilinear', 
-                align_corners=False
-            )
+            stage3_out = self.skip_fusion3(stage3_up, encoder_features['stage2'])
         else:
             stage3_out = stage3_up
         
         # Stage 4: Process fine details (64×64)
-        stage1_cultural = self.cultural_attn(encoder_features['stage1'])
         stage4_input = {
-            'stage1_cultural': stage1_cultural,
+            'stage1': encoder_features['stage1'],
             'mid3': stage3_out
         }
         stage4_aligned = self.stage4_ra(stage4_input)
         stage4_attn = self.stage4_csa(stage4_aligned)
         stage4_up = self.stage4_up(stage4_attn)
         
-        # Skip connection from stage1 if enabled
+        # Apply enhanced skip connection
         if self.skip_connections:
-            stage4_out = stage4_up + F.interpolate(
-                encoder_features['stage1'], 
-                size=stage4_up.shape[2:], 
-                mode='bilinear', 
-                align_corners=False
-            )
+            stage4_out = self.skip_fusion4(stage4_up, encoder_features['stage1'])
         else:
             stage4_out = stage4_up
         
@@ -993,8 +1078,8 @@ if __name__ == "__main__":
         'stage4': torch.randn(batch_size, 768, 8, 8)
     }
     
-    # Initialize the decoder
-    decoder = MuralDecoderModule(
+    # Initialize the high-performance decoder
+    decoder = HighPerformanceDecoderModule(
         encoder_dims={
             'stage1': 96,
             'stage2': 192,
@@ -1002,7 +1087,7 @@ if __name__ == "__main__":
             'stage4': 768
         },
         skip_connections=True,
-        use_dynamic_windows=True
+        high_capacity_mode='balanced'
     )
     
     # Forward pass
