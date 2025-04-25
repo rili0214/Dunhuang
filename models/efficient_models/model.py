@@ -1,16 +1,15 @@
 """
-efficient_model.py - Memory-Efficient Mural Restoration Model for Dun Huang Murals
+model.py - Mural Restoration Model for Dun Huang Murals
 
-This module integrates the encoder and efficient decoder components into a complete
-mural restoration model. It handles the end-to-end process of generating the initial
-restoration, which will then be passed to the physics refinement module.
+This module integrates the encoder and decoder components into a complete mural restoration 
+model. It handles the end-to-end process of generating the initial restoration, which will 
+then be passed to the physics refinement module.
 
 Key components:
-- EfficientMuralRestorationModel: Complete model integrating encoder and efficient decoder
-- Memory optimization techniques to reduce VRAM usage
+- MuralRestorationModel: Complete model integrating encoder and decoder
 
 Usage:
-    model = EfficientMuralRestorationModel(
+    model = MuralRestorationModel(
         pretrained_encoder=True,
         use_skip_connections=True,
         encoder_stages_to_unfreeze=['stage1']
@@ -25,10 +24,10 @@ import torch.nn as nn
 from typing import Dict, Optional, Tuple, List
 
 from encoder import SwinEncoderExtractor
-from decoder import EfficientDecoderModule
+from decoder import DecoderModule
 
 
-class EfficientMuralRestorationModel(nn.Module):
+class MuralRestorationModel(nn.Module):
     """
     Memory-efficient model for Dun Huang Mural restoration.
     
@@ -51,7 +50,7 @@ class EfficientMuralRestorationModel(nn.Module):
         optimize_memory: bool = True
     ):
         """
-        Initialize the efficient mural restoration model.
+        Initialize the mural restoration model.
         
         Args:
             pretrained_encoder (bool): Whether to use pretrained weights for encoder
@@ -59,7 +58,7 @@ class EfficientMuralRestorationModel(nn.Module):
             encoder_stages_to_unfreeze (Optional[list]): List of encoder stages to unfreeze
             optimize_memory (bool): Whether to apply memory optimizations
         """
-        super(EfficientMuralRestorationModel, self).__init__()
+        super(MuralRestorationModel, self).__init__()
         
         # Initialize the encoder
         self.encoder = SwinEncoderExtractor(pretrained=pretrained_encoder)
@@ -71,8 +70,8 @@ class EfficientMuralRestorationModel(nn.Module):
         # Get encoder dimensions
         encoder_dims = self.encoder.output_dims
         
-        # Initialize the efficient decoder
-        self.decoder = EfficientDecoderModule(
+        # Initialize the decoder
+        self.decoder = DecoderModule(
             encoder_dims=encoder_dims,
             skip_connections=use_skip_connections
         )
@@ -103,7 +102,7 @@ class EfficientMuralRestorationModel(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the efficient model.
+        Forward pass through the model.
         
         Args:
             x (torch.Tensor): Damaged image tensor [B, 3, 256, 256]
@@ -114,12 +113,12 @@ class EfficientMuralRestorationModel(nn.Module):
         # Extract features from encoder
         if self.optimize_memory:
             # Process in stages with gradient checkpointing to save memory
-            with torch.cuda.amp.autocast(enabled=True):
+            with torch.amp.autocast(enabled=True):
                 encoder_features = self.encoder(x)
         else:
             encoder_features = self.encoder(x)
         
-        # Pass features to efficient decoder
+        # Pass features to decoder
         restored_image = self.decoder(encoder_features)
         
         return restored_image
@@ -159,7 +158,7 @@ if __name__ == "__main__":
     dummy_input = torch.randn(batch_size, 3, 256, 256)
     
     # Initialize the efficient model
-    model = EfficientMuralRestorationModel(
+    model = MuralRestorationModel(
         pretrained_encoder=True,
         use_skip_connections=True,
         encoder_stages_to_unfreeze=['stage1'],  # Only unfreeze stage1 of encoder
