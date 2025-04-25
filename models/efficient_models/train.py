@@ -2,8 +2,7 @@
 train.py - Training Pipeline for Dun Huang Mural Restoration
 
 This module implements the complete training pipeline for the mural restoration model,
-including data loading, loss functions, optimization, and evaluation. It is designed
-specifically for the unique challenges of Dun Huang Mural restoration.
+including data loading, loss functions, optimization, and evaluation. 
 
 Key components:
 - MuralDataset: Custom dataset for damaged/restored mural pairs
@@ -40,8 +39,8 @@ from torchvision.utils import save_image
 
 # Import the updated model components
 from encoder import SwinEncoderExtractor
-from decoder import EfficientDecoderModule
-from efficient_model import EfficientMuralRestorationModel
+from decoder import DecoderModule
+from model import MuralRestorationModel
 
 
 class MuralDataset(Dataset):
@@ -465,7 +464,7 @@ class MuralTrainer:
     - Logging and visualization
     
     Attributes:
-        model (EfficientMuralRestorationModel): The mural restoration model
+        model (MuralRestorationModel): The mural restoration model
         optimizer (optim.Optimizer): Optimization algorithm
         scheduler (optim.lr_scheduler._LRScheduler): Learning rate scheduler
         criterion (MuralLoss): Loss function
@@ -475,14 +474,14 @@ class MuralTrainer:
     def __init__(
         self,
         args: argparse.Namespace,
-        model: Optional[EfficientMuralRestorationModel] = None
+        model: Optional[MuralRestorationModel] = None
     ):
         """
         Initialize the trainer.
         
         Args:
             args (argparse.Namespace): Training arguments
-            model (Optional[EfficientMuralRestorationModel]): Pre-initialized model (if None, creates new)
+            model (Optional[MuralRestorationModel]): Pre-initialized model (if None, creates new)
         """
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -494,7 +493,7 @@ class MuralTrainer:
         
         # Initialize or load model
         if model is None:
-            self.model = EfficientMuralRestorationModel(
+            self.model = MuralRestorationModel(
                 pretrained_encoder=True,
                 use_skip_connections=args.use_skip_connections,
                 encoder_stages_to_unfreeze=args.unfreeze_encoder_stages,
@@ -537,7 +536,7 @@ class MuralTrainer:
         
         # Enable automatic mixed precision if specified
         self.use_amp = args.use_amp and torch.cuda.is_available()
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.scaler = torch.amp.GradScaler() if self.use_amp else None
         
         # Load checkpoint if provided
         if args.resume:
