@@ -395,6 +395,18 @@ class EfficientCSABlock(nn.Module):
         # Normalization and MLP layers
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
+
+        # Windowed self-attention modules
+        self.attn_modules = nn.ModuleDict({
+            f'window_{size}': WindowAttention(
+                dim=dim,
+                window_size=size,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                attn_drop=attn_drop,
+                proj_drop=drop
+            ) for size in [2, 4, 6, 8]  # Predefine all possible window sizes
+        })
         
         # Feed-forward network (memory-efficient)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -481,6 +493,8 @@ class EfficientCSABlock(nn.Module):
         
         # Compute dynamic window size based on feature resolution
         window_size = get_dynamic_window_size((H, W))
+
+        window_attn = self.attn_modules[f'window_{window_size}']
         
         # Apply window attention
         x_norm = self.norm1(x)
