@@ -1,14 +1,13 @@
 """
-efficient_decoder.py - Streamlined Memory-Efficient Decoder for Dun Huang Mural Restoration
+decoder.py - Memory-Efficient Decoder for Dun Huang Mural Restoration
 
-This module implements a simplified and memory-efficient decoder that removes specialized 
-cultural attention and pigment-aware processing, relying instead on the physics refinement
-module for domain-specific processing. The decoder focuses on structural image restoration
-while optimizing memory usage.
+This module implements a simplified and memory-efficient decoder, relying on the 
+physics refinement module for domain-specific processing. The decoder focuses on 
+structural image restoration while optimizing memory usage.
 
 Key components:
-- ChannelCompression: Reduces channel dimensions while preserving information
-- SkipFusion: Enhanced skip connection handling with concatenation + convolution
+- ChannelCompression: Reduces channel dimensions
+- SkipFusion: Enhanced skip connection 
 - AdaptiveCSABlock: Generic cross-scale attention with dynamic window sizes
 - UpsampleBlock: Various upsampling strategies with residual refinement
 - EfficientDecoderModule: Streamlined decoder implementation
@@ -40,7 +39,6 @@ def get_dynamic_window_size(resolution: Tuple[int, int]) -> int:
     Returns:
         int: Calculated window size
     """
-    # Larger windows for smaller resolutions, smaller windows for larger resolutions
     avg_size = (resolution[0] + resolution[1]) // 2
     
     if avg_size <= 8:
@@ -239,10 +237,7 @@ class ResolutionAligner(nn.Module):
 
 class WindowAttention(nn.Module):
     """
-    Memory-efficient window-based multi-head self-attention.
-    
-    This is an optimized version of the window attention mechanism,
-    designed to minimize memory usage while maintaining effectiveness.
+    Window-based multi-head self-attention.
     
     Attributes:
         dim (int): Input feature dimension
@@ -277,8 +272,7 @@ class WindowAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
-        # Relative position bias parameters (memory-optimized)
-        # Use a smaller size for position bias table
+        # Relative position bias parameters
         self.relative_position_bias_table = nn.Parameter(
             torch.zeros((2 * window_size - 1) * (2 * window_size - 1), num_heads)
         )
@@ -298,7 +292,7 @@ class WindowAttention(nn.Module):
         relative_position_index = relative_coords.sum(-1)
         self.register_buffer("relative_position_index", relative_position_index)
         
-        # Memory-efficient QKV projection (grouped)
+        # QKV projection (grouped)
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -320,14 +314,14 @@ class WindowAttention(nn.Module):
         """
         B_, N, C = x.shape
         
-        # Memory-efficient QKV computation
+        # QKV computation
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         
         # Scale query
         q = q * self.scale
         
-        # Compute attention (memory-efficient implementation)
+        # Compute attention
         attn = (q @ k.transpose(-2, -1))
         
         # Apply relative position bias
@@ -347,7 +341,7 @@ class WindowAttention(nn.Module):
         attn = F.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
         
-        # Apply attention to values (memory-efficient implementation)
+        # Apply attention to values
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         
         # Project back to original dimension
@@ -357,12 +351,11 @@ class WindowAttention(nn.Module):
         return x
 
 
-class EfficientCSABlock(nn.Module):
+class CSABlock(nn.Module):
     """
-    Memory-efficient Cross-Scale Attention Block.
+    Cross-Scale Attention Block.
     
-    This block implements self-attention within windows with dynamic sizing,
-    optimized for memory efficiency while maintaining restoration quality.
+    This block implements self-attention within windows with dynamic sizing.
     
     Attributes:
         dim (int): Input feature dimension
@@ -380,7 +373,7 @@ class EfficientCSABlock(nn.Module):
         attn_drop: float = 0.0
     ):
         """
-        Initialize the efficient CSA block.
+        Initialize the CSA block.
         
         Args:
             dim (int): Input feature dimension
@@ -390,7 +383,7 @@ class EfficientCSABlock(nn.Module):
             drop (float): Dropout rate for MLP
             attn_drop (float): Dropout rate for attention
         """
-        super(EfficientCSABlock, self).__init__()
+        super(CSABlock, self).__init__()
         
         # Normalization and MLP layers
         self.norm1 = nn.LayerNorm(dim)
@@ -408,7 +401,7 @@ class EfficientCSABlock(nn.Module):
             ) for size in [2, 4, 6, 8]  # Predefine all possible window sizes
         })
         
-        # Feed-forward network (memory-efficient)
+        # Feed-forward network
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_hidden_dim),
@@ -527,7 +520,7 @@ class EfficientCSABlock(nn.Module):
 
 class UpsampleBlock(nn.Module):
     """
-    Memory-efficient upsampling block with residual refinement.
+    Upsampling block with residual refinement.
     
     This module handles upsampling of feature maps using either transposed convolution
     or pixel shuffle, with appropriate normalization and activation.
@@ -595,7 +588,7 @@ class UpsampleBlock(nn.Module):
         else:
             raise ValueError(f"Unsupported upsampling mode: {mode}")
         
-        # Lightweight residual refinement block
+        # Residual refinement block
         self.refine = nn.Sequential(
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, groups=out_channels),
             nn.Conv2d(out_channels, out_channels, kernel_size=1),
@@ -620,13 +613,12 @@ class UpsampleBlock(nn.Module):
         return x + self.refine(x)
 
 
-class EfficientDecoderModule(nn.Module):
+class DecoderModule(nn.Module):
     """
-    Memory-efficient decoder module for Dun Huang Mural restoration.
+    Decoder module for Dun Huang Mural restoration.
     
     This module implements a streamlined decoder architecture that focuses on
-    structural image restoration while reducing memory usage, relying on the
-    physics refinement module for domain-specific processing.
+    structural image restoration.
     
     Attributes:
         encoder_dims (Dict[str, int]): Dimensions of encoder feature maps
@@ -639,20 +631,20 @@ class EfficientDecoderModule(nn.Module):
         skip_connections: bool = True
     ):
         """
-        Initialize the efficient mural decoder module.
+        Initialize the mural decoder module.
         
         Args:
             encoder_dims (Dict[str, int]): Dictionary mapping encoder stage names to channel dimensions
             skip_connections (bool): Whether to use enhanced skip connections from encoder to decoder
         """
-        super(EfficientDecoderModule, self).__init__()
+        super(DecoderModule, self).__init__()
         
         self.skip_connections = skip_connections
         
         # Store input dimensions for reference
         self.encoder_dims = encoder_dims
         
-        # Channel compression for deep features (memory-efficient)
+        # Channel compression for deep features
         self.compress_stage3 = ChannelCompression(encoder_dims['stage3'], 256)
         self.compress_stage4 = ChannelCompression(encoder_dims['stage4'], 256)
         
@@ -662,7 +654,7 @@ class EfficientDecoderModule(nn.Module):
             target_channels=256,
             target_size=(8, 8)
         )
-        self.stage1_csa = EfficientCSABlock(
+        self.stage1_csa = CSABlock(
             dim=256,
             num_heads=8,
             mlp_ratio=4.0
@@ -688,7 +680,7 @@ class EfficientDecoderModule(nn.Module):
             target_channels=192,
             target_size=(16, 16)
         )
-        self.stage2_csa = EfficientCSABlock(
+        self.stage2_csa = CSABlock(
             dim=192,
             num_heads=4
         )
@@ -712,7 +704,7 @@ class EfficientDecoderModule(nn.Module):
             target_channels=96,
             target_size=(32, 32)
         )
-        self.stage3_csa = EfficientCSABlock(
+        self.stage3_csa = CSABlock(
             dim=96,
             num_heads=4
         )
@@ -736,7 +728,7 @@ class EfficientDecoderModule(nn.Module):
             target_channels=64,
             target_size=(64, 64)
         )
-        self.stage4_csa = EfficientCSABlock(
+        self.stage4_csa = CSABlock(
             dim=64,
             num_heads=4,
             mlp_ratio=2.0
@@ -761,7 +753,7 @@ class EfficientDecoderModule(nn.Module):
             nn.InstanceNorm2d(32),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(32, 3, kernel_size=3, padding=1),
-            nn.Tanh()  # Standard range for initial restoration
+            nn.Tanh() 
         )
     
     def forward(self, encoder_features: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -863,7 +855,7 @@ if __name__ == "__main__":
     }
     
     # Initialize the efficient decoder
-    decoder = EfficientDecoderModule(
+    decoder = DecoderModule(
         encoder_dims={
             'stage1': 96,
             'stage2': 192,
