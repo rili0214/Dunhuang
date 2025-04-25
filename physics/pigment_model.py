@@ -1,1083 +1,170 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import matplotlib.pyplot as plt
-from collections import defaultdict
-from sklearn.cluster import KMeans
-import json
-import os
+import numpy as np
 
-try:
-    from chemparse import parse_formula     # pip install chemparse if not installed
-except ImportError:
-    # Fallback implementation if chemparse isn't available, should work as I believe
-    def parse_formula(formula):
-        """Simple chemical formula parser"""
-        import re
-        pattern = r'([A-Z][a-z]*)(\d*)'
-        matches = re.findall(pattern, formula)
-        result = {}
-        for element, count in matches:
-            result[element] = int(count) if count else 1
-        return result
+from pigment_database import DunhuangPigmentDB
+from color_pig_map import ColorToPigmentMapper
+from optical_properties import OpticalProperties
+from themodynamicval import ThermodynamicValidator
 
-# ===== 1. Dunhuang Pigment Database =====
-class DunhuangPigmentDB:
-    """
-    Database of historical pigments used in Dunhuang murals based on research paper data.
-    Paper Link: https://skytyz.dha.ac.cn/CN/Y2022/V1/I1/47 
-    Provides structured access to pigment properties including chemical composition,
-    optical properties, aging characteristics,historical usage patterns, and particle size.
-    """
-    def __init__(self):
-        self.pigments = self._init_pigment_data()
-        self.color_to_pigment = self._init_color_mapping()
-        self.pigment_to_chemical = self._init_chemical_mapping()
-        self.id_to_name = {i: p["name"] for i, p in enumerate(self.pigments)}
-        self.name_to_id = {p["name"]: i for i, p in enumerate(self.pigments)}
-        
-    def _init_pigment_data(self):
-        """Pigment data from research paper"""
-        return [
-            # White pigments (Table 1 in the paper)
-            {"name": "kaolin", "color": "white", "formula": "Al2Si2O5(OH)4", 
-            "reflectance": [0.95, 0.95, 0.95], "roughness": 0.25,
-            "aging": {"yellowing": 0.1, "darkening": 0.1, "fading": 0.2},
-            "particle_size": {"mean": 5.0, "std": 1.2, "unit": "micron"}}, 
-            
-            {"name": "calcium_carbonate", "color": "white", "formula": "CaCO3", 
-            "reflectance": [0.92, 0.92, 0.92], "roughness": 0.3,
-            "aging": {"yellowing": 0.15, "darkening": 0.12, "fading": 0.1},
-            "particle_size": {"mean": 3.5, "std": 0.9, "unit": "micron"}},
-            
-            {"name": "gypsum", "color": "white", "formula": "CaSO4·2H2O", 
-            "reflectance": [0.9, 0.9, 0.9], "roughness": 0.27,
-            "aging": {"yellowing": 0.2, "darkening": 0.12, "fading": 0.1},
-            "particle_size": {"mean": 8.0, "std": 1.5, "unit": "micron"}},
-            
-            {"name": "lead_white", "color": "white", "formula": "Pb3(CO3)2(OH)2", 
-            "reflectance": [0.93, 0.93, 0.93], "roughness": 0.2,
-            "aging": {"yellowing": 0.2, "darkening": 0.6, "fading": 0.05},
-            "particle_size": {"mean": 2.5, "std": 0.8, "unit": "micron"}},
-            
-            # Red pigments (Table 2)
-            {"name": "cinnabar", "color": "red", "formula": "HgS", 
-            "reflectance": [0.85, 0.1, 0.1], "roughness": 0.4,
-            "aging": {"yellowing": 0.05, "darkening": 0.2, "fading": 0.3},
-            "particle_size": {"mean": 1.5, "std": 0.5, "unit": "micron"}},
-            
-            {"name": "vermilion", "color": "red", "formula": "HgS", 
-            "reflectance": [0.88, 0.12, 0.1], "roughness": 0.35,
-            "aging": {"yellowing": 0.05, "darkening": 0.2, "fading": 0.3},
-            "particle_size": {"mean": 1.8, "std": 0.6, "unit": "micron"}},
-            
-            {"name": "hematite", "color": "red", "formula": "Fe2O3", 
-            "reflectance": [0.7, 0.15, 0.15], "roughness": 0.5,
-            "aging": {"yellowing": 0.1, "darkening": 0.5, "fading": 0.1},
-            "particle_size": {"mean": 4.0, "std": 1.0, "unit": "micron"}},
-            
-            {"name": "lead_oxide", "color": "red", "formula": "Pb3O4", 
-            "reflectance": [0.85, 0.25, 0.1], "roughness": 0.3,
-            "aging": {"yellowing": 0.1, "darkening": 0.7, "fading": 0.2},
-            "particle_size": {"mean": 3.0, "std": 0.7, "unit": "micron"}},
-            
-            # Blue pigments (Table 3)
-            {"name": "azurite", "color": "blue", "formula": "Cu3(CO3)2(OH)2", 
-            "reflectance": [0.1, 0.3, 0.8], "roughness": 0.45,
-            "aging": {"yellowing": 0.3, "darkening": 0.4, "fading": 0.2},
-            "particle_size": {"mean": 7.0, "std": 1.8, "unit": "micron"}},
-            
-            {"name": "lapis_lazuli", "color": "blue", "formula": "Na8Ca8(AlSiO4)6S", 
-            "reflectance": [0.15, 0.25, 0.85], "roughness": 0.4,
-            "aging": {"yellowing": 0.1, "darkening": 0.2, "fading": 0.15},
-            "particle_size": {"mean": 10.0, "std": 2.5, "unit": "micron"}},
-            
-            {"name": "synthetic_blue", "color": "blue", "formula": "Na6Al4Si4S4O20", 
-            "reflectance": [0.2, 0.4, 0.82], "roughness": 0.35,
-            "aging": {"yellowing": 0.2, "darkening": 0.3, "fading": 0.25},
-            "particle_size": {"mean": 5.0, "std": 1.0, "unit": "micron"}},
-            
-            # Green pigments (Table 4)
-            {"name": "malachite", "color": "green", "formula": "Cu2Cl(OH)3", 
-            "reflectance": [0.1, 0.75, 0.2], "roughness": 0.4,
-            "aging": {"yellowing": 0.25, "darkening": 0.35, "fading": 0.2},
-            "particle_size": {"mean": 6.0, "std": 1.2, "unit": "micron"}},
-            
-            {"name": "atacamite", "color": "green", "formula": "Cu2(CO3)(OH)2", 
-            "reflectance": [0.15, 0.7, 0.25], "roughness": 0.45,
-            "aging": {"yellowing": 0.3, "darkening": 0.3, "fading": 0.25},
-            "particle_size": {"mean": 5.5, "std": 1.0, "unit": "micron"}},
-            
-            # Yellow pigments (Table 5)
-            {"name": "yellow_ochre", "color": "yellow", "formula": "FeO(OH)", 
-            "reflectance": [0.85, 0.75, 0.1], "roughness": 0.5,
-            "aging": {"yellowing": 0.05, "darkening": 0.4, "fading": 0.2},
-            "particle_size": {"mean": 3.5, "std": 0.9, "unit": "micron"}},
-            
-            {"name": "orpiment", "color": "yellow", "formula": "As2S3", 
-            "reflectance": [0.9, 0.8, 0.1], "roughness": 0.35,
-            "aging": {"yellowing": 0.1, "darkening": 0.2, "fading": 0.4},
-            "particle_size": {"mean": 2.0, "std": 0.6, "unit": "micron"}},
-            
-            {"name": "realgar", "color": "yellow", "formula": "As4S4", 
-            "reflectance": [0.85, 0.6, 0.05], "roughness": 0.4,
-            "aging": {"yellowing": 0.1, "darkening": 0.3, "fading": 0.5},
-            "particle_size": {"mean": 2.5, "std": 0.7, "unit": "micron"}}
-        ]
-    
-    def _init_color_mapping(self):
-        """Map colors to pigment indices based on paper data"""
-        color_map = defaultdict(list)
-        for i, pigment in enumerate(self.pigments):
-            color_map[pigment["color"]].append(i)
-        return dict(color_map)
-    
-    def _init_chemical_mapping(self):
-        """Map pigments to chemical compositions for validation"""
-        chem_map = {}
-        for i, pigment in enumerate(self.pigments):
-            chem_map[i] = self._parse_chemical_formula(pigment["formula"])
-        return chem_map
-    
-    def _parse_chemical_formula(self, formula):
-        """
-        Parse chemical formula to element counts using proper parsing
-        """
-        # Parse the formula to get element counts
-        try:
-            elements = parse_formula(formula)
-        except Exception as e:
-            # Fallback to simplified parsing if error occurs
-            print(f"Error parsing formula {formula}: {e}")
-            elements = defaultdict(int)
-            if 'Cu' in formula:
-                elements['Cu'] = formula.count('Cu')
-            if 'Fe' in formula:
-                elements['Fe'] = formula.count('Fe')
-            if 'Hg' in formula:
-                elements['Hg'] = formula.count('Hg')
-            if 'Pb' in formula:
-                elements['Pb'] = formula.count('Pb')
-            if 'As' in formula:
-                elements['As'] = formula.count('As')
-            if 'Ca' in formula:
-                elements['Ca'] = formula.count('Ca')
-            if 'Al' in formula:
-                elements['Al'] = formula.count('Al')
-            if 'Si' in formula:
-                elements['Si'] = formula.count('Si')
-            
-        return dict(elements)
-    
-    def get_reflectance(self, pigment_id):
-        """Get reflectance for a pigment by ID"""
-        return torch.tensor(self.pigments[pigment_id]["reflectance"])
-    
-    def get_roughness(self, pigment_id):
-        """Get roughness for a pigment by ID"""
-        return self.pigments[pigment_id]["roughness"]
-    
-    def get_aging_factors(self, pigment_id):
-        """Get aging factors for a pigment by ID"""
-        return self.pigments[pigment_id]["aging"]
-    
-    def get_pigments_by_color(self, color):
-        """Get pigment IDs for a given color category"""
-        return self.color_to_pigment.get(color, [])
-    
-    def get_chemical_signature(self, pigment_id):
-        """Get chemical signature for validation"""
-        return self.pigment_to_chemical[pigment_id]
-
-
-# ===== 2. Optical Properties Module =====
-class OpticalProperties(nn.Module):
-    """
-    OpticalProperties module that integrates Dunhuang-specific pigment data from 
-    research paper.
-    """
-    def __init__(self, num_pigments=16, pigment_embedding_dim=32):
-        super().__init__()
-        self.num_pigments = num_pigments
-        self.pigment_embedding_dim = pigment_embedding_dim
-        
-        # Initialize pigment database
-        self.pigment_db = DunhuangPigmentDB()
-        
-        # Embedding for pigment types
-        self.pigment_embedding = nn.Embedding(num_pigments, pigment_embedding_dim)
-        
-        # Learnable parameters for optical properties
-        self.roughness_pred = nn.Sequential(
-            nn.Linear(pigment_embedding_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()  # Roughness in [0, 1]
-        )
-        
-        self.reflectance_pred = nn.Sequential(
-            nn.Linear(pigment_embedding_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 3),
-            nn.Sigmoid()  # RGB reflectance in [0, 1]
-        )
-        
-        self.aging_factor_pred = nn.Sequential(
-            nn.Linear(pigment_embedding_dim + 1, 32),  # +1 for age input
-            nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 9),  # 3 RGB factors for each of (yellowing, darkening, fading)
-            nn.Sigmoid()
-        )
-        
-        # Initialize with Dunhuang pigment data
-        self._initialize_from_dunhuang_pigments()
-        
-    def _initialize_from_dunhuang_pigments(self):
-        """
-        Xavier initialization from database guidance, for better stability.
-        """
-        nn.init.xavier_normal_(self.pigment_embedding.weight)
-        
-        with torch.no_grad():
-            # Initialize with known reflectance and roughness values
-            for i in range(min(self.num_pigments, len(self.pigment_db.pigments))):
-                pigment = self.pigment_db.pigments[i]
-                
-                # Initialize embedding first dimensions with reflectance
-                self.pigment_embedding.weight.data[i, 0:3] = torch.tensor(pigment["reflectance"])
-                
-                # Initialize roughness bias based on database value
-                # Find the final layer in roughness prediction
-                roughness_final_layer = self.roughness_pred[-2]  # Last linear layer before sigmoid
-                if i < roughness_final_layer.bias.shape[0]:
-                    roughness_final_layer.bias.data[0] += (pigment["roughness"] - 0.5) * 0.1
-                
-                # Initialize aging factors in additional dimensions
-                if "aging" in pigment:
-                    self.pigment_embedding.weight.data[i, 3] = pigment["aging"]["yellowing"]
-                    self.pigment_embedding.weight.data[i, 4] = pigment["aging"]["darkening"]
-                    self.pigment_embedding.weight.data[i, 5] = pigment["aging"]["fading"]
-    
-    def _compute_aging_effect(self, pigment_embed, age_factor):
-        """
-        Compute aging effects with pigment-specific behaviors based on Dunhuang research.
-        """
-        # Handle input dimensions
-        original_shape = pigment_embed.shape
-        
-        # Ensure pigment_embed is 2D: [batch_size, embedding_dim]
-        if len(original_shape) == 3:  # [batch_size, k, embedding_dim]
-            batch_size, k, embed_dim = original_shape
-            pigment_embed = pigment_embed.reshape(-1, embed_dim)  # [batch_size*k, embedding_dim]
-            
-            # Ensure age_factor matches pigment_embed
-            if len(age_factor.shape) == 1:  # [batch_size]
-                age_factor = age_factor.unsqueeze(1).expand(-1, k).reshape(-1)  # [batch_size*k]
-            elif len(age_factor.shape) == 2 and age_factor.shape[1] == 1:  # [batch_size, 1]
-                age_factor = age_factor.expand(-1, k).reshape(-1)  # [batch_size*k]
-        
-        # Ensure age_factor is 2D
-        if len(age_factor.shape) == 1:
-            age_expanded = age_factor.unsqueeze(-1)  # [batch_size, 1] or [batch_size*k, 1]
-        else:
-            age_expanded = age_factor  # already [batch_size, 1] or [batch_size*k, 1]
-        
-        # Combine embedding and age
-        aging_input = torch.cat([pigment_embed, age_expanded], dim=-1)
-        
-        # Predict aging factors with pigment-specific behaviors
-        aging_factors = self.aging_factor_pred(aging_input)
-        
-        # Split into different effects
-        yellowing = aging_factors[:, 0:3]  # RGB
-        darkening = aging_factors[:, 3:6]  # RGB
-        fading = aging_factors[:, 6:9]     # RGB
-        
-        # Reshape if original input was 3D
-        if len(original_shape) == 3:
-            yellowing = yellowing.reshape(batch_size, k, 3)
-            darkening = darkening.reshape(batch_size, k, 3)
-            fading = fading.reshape(batch_size, k, 3)
-        
-        # Create effects dictionary
-        return {
-            'yellowing': yellowing,
-            'darkening': darkening,
-            'fading': fading
-        }
-    
-    def _apply_aging(self, reflectance, aging_effects, age_factor):
-        """
-        Apply aging effects to reflectance based on Dunhuang research.
-        Incorporates chemical-specific aging patterns observed in murals.
-        """
-        # Handle input dimensions
-        original_shape = reflectance.shape
-        is_3d = len(original_shape) == 3
-        
-        # Prepare age_factor to match dimensions
-        if is_3d:
-            if len(age_factor.shape) == 1:  # [batch_size]
-                age = age_factor.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1]
-            else:  # [batch_size, 1]
-                age = age_factor.unsqueeze(2)  # [batch_size, 1, 1]
-        else:
-            if len(age_factor.shape) == 1:  # [batch_size]
-                age = age_factor.unsqueeze(1)  # [batch_size, 1]
-            else:  # [batch_size, 1]
-                age = age_factor  # already [batch_size, 1]
-        
-        # Get effects
-        yellowing = aging_effects['yellowing']
-        darkening = aging_effects['darkening']
-        fading = aging_effects['fading']
-        
-        # Create yellowing mask
-        # Lead-based pigments yellow differently than mineral-based ones (from research)
-        if is_3d:
-            yellowing_mask = torch.tensor([1.0, 0.6, -0.4], device=reflectance.device).view(1, 1, 3)
-        else:
-            yellowing_mask = torch.tensor([1.0, 0.6, -0.4], device=reflectance.device).view(1, 3)
-        
-        # Apply yellowing - more pronounced in lead-based white pigments (from research)
-        yellowing_effect = 1.0 + yellowing * yellowing_mask * age
-        
-        # Apply darkening - iron oxide pigments darken more (from research)
-        darkening_effect = 1.0 - darkening * age
-        
-        # Apply fading - arsenic-based pigments (realgar/orpiment) fade more (from research)
-        fading_direction = 1.0 - reflectance  # direction toward white
-        fading_effect = reflectance + fading * fading_direction * age
-        
-        # Combine effects - first apply yellowing and darkening
-        intermediate = reflectance * yellowing_effect * darkening_effect
-        
-        # Then blend with fading effect
-        if is_3d:
-            fade_blend_factor = (age * 0.5)  # [batch_size, 1, 1]
-        else:
-            fade_blend_factor = (age * 0.5)  # [batch_size, 1]
-            
-        aged_reflectance = (1 - fade_blend_factor) * intermediate + fade_blend_factor * fading_effect
-        aged_reflectance = torch.clamp(aged_reflectance, 0.0, 1.0)
-        
-        return aged_reflectance
-    
-    def _apply_particle_size_effects(self, reflectance, roughness, particle_data):
-        """
-        Apply corrections based on particle size distribution
-        - Smaller particles increase saturation but reduce overall reflectance
-        - Larger particles increase scattering (roughness) but maintain reflectance
-        """
-        mean_size = particle_data['mean']
-        std_size = particle_data['std']
-        
-        # Normalize to a reference size of 5 microns
-        size_ratio = mean_size / 5.0
-        
-        # Adjust reflectance based on size
-        # Smaller particles appear more saturated but slightly darker
-        if size_ratio < 1.0:
-            # Enhance saturation by pulling values away from middle gray
-            middle = torch.tensor([0.5, 0.5, 0.5], device=reflectance.device)
-            reflectance = middle + (reflectance - middle) * (1.0 + (1.0 - size_ratio) * 0.2)
-            # Slightly reduce brightness for smaller particles
-            reflectance = reflectance * (0.95 + size_ratio * 0.05)
-        else:
-            # Larger particles maintain reflectance but appear less saturated
-            middle = torch.tensor([0.5, 0.5, 0.5], device=reflectance.device)
-            reflectance = middle + (reflectance - middle) / (1.0 + (size_ratio - 1.0) * 0.1)
-        
-        # Adjust roughness based on size
-        # Larger particles increase surface roughness
-        roughness_mod = roughness * (0.8 + size_ratio * 0.2)
-        
-        # Apply variability based on standard deviation
-        # Higher std means more variation in optical properties
-        variability = std_size / mean_size  # Coefficient of variation
-        
-        # Add subtle texture variation based on particle size variability
-        texture_variance = torch.rand_like(roughness) * variability * 0.1
-        roughness_final = torch.clamp(roughness_mod + texture_variance, 0.05, 0.95)
-        
-        return reflectance, roughness_final
-        
-    def forward(self, pigment_indices, age_factor=None):
-        """
-        Calculate optical properties for given pigments with aging effects based on 
-        Dunhuang research.
-        """
-        # Handle input dimensions
-        original_shape = pigment_indices.shape
-        is_2d = len(original_shape) == 2
-        
-        # Check if input indices are out of range
-        pigment_indices = torch.clamp(pigment_indices, 0, self.num_pigments - 1)
-        
-        # Get pigment embeddings
-        if is_2d:
-            # If input is [batch_size, k]
-            batch_size, k = original_shape
-            
-            # Flatten for embedding lookup, then restore shape
-            flat_indices = pigment_indices.reshape(-1)  # [batch_size*k]
-            pigment_embed_flat = self.pigment_embedding(flat_indices)  # [batch_size*k, embed_dim]
-            pigment_embed = pigment_embed_flat.reshape(batch_size, k, -1)  # [batch_size, k, embed_dim]
-            
-            # Predict optical properties for each pigment
-            # Flatten for processing
-            flat_embed = pigment_embed.reshape(-1, self.pigment_embedding_dim)  # [batch_size*k, embed_dim]
-            
-            # Calculate reflectance and roughness
-            flat_reflectance = self.reflectance_pred(flat_embed)  # [batch_size*k, 3]
-            flat_roughness = self.roughness_pred(flat_embed)      # [batch_size*k, 1]
-            
-            # Restore batch dimensions
-            reflectance = flat_reflectance.reshape(batch_size, k, 3)  # [batch_size, k, 3]
-            roughness = flat_roughness.reshape(batch_size, k, 1)      # [batch_size, k, 1]
-            
-        else:
-            # If input is [batch_size]
-            pigment_embed = self.pigment_embedding(pigment_indices)  # [batch_size, embed_dim]
-            
-            # Predict basic properties
-            reflectance = self.reflectance_pred(pigment_embed)  # [batch_size, 3]
-            roughness = self.roughness_pred(pigment_embed)      # [batch_size, 1]
-        
-        # Apply aging effects if age factor is provided
-        if age_factor is not None:
-            # Calculate aging effects
-            aging_effects = self._compute_aging_effect(pigment_embed, age_factor)
-            
-            # Apply aging to reflectance
-            aged_reflectance = self._apply_aging(reflectance, aging_effects, age_factor)
-            
-            return {
-                'reflectance': aged_reflectance,
-                'roughness': roughness,
-                'age_factor': age_factor,
-                'aging_effects': aging_effects
-            }
-        
-        return {
-            'reflectance': reflectance,
-            'roughness': roughness
-        }
-
-
-# ===== 3. Color to Pigment Mapper with K-means clustering =====
-class ColorToPigmentMapper(nn.Module):
-    """
-    Maps image color features to probabilistic pigment distributions based on Dunhuang 
-    mural research.
-    """
-    def __init__(self, swin_feat_dim=768, color_feat_dim=128, num_pigments=16):
-        super().__init__()
-        self.num_pigments = num_pigments
-        self.swin_feat_dim = swin_feat_dim
-        self.color_feat_dim = color_feat_dim
-        
-        # Initialize pigment database
-        self.pigment_db = DunhuangPigmentDB()
-        
-        # Color feature extraction - make this more flexible for different input sizes
-        self.color_encoder = nn.Sequential(
-            nn.Linear(3*256, 256),  # RGB histogram (256 bins per channel)
-            nn.ReLU(),
-            nn.Linear(256, color_feat_dim)
-        )
-        
-        # Add feature adaptation layer to handle varying input dimensions
-        self.feature_adapter = nn.Linear(3, swin_feat_dim)  # Default simple adapter
-        
-        # Joint feature processing
-        self.joint_mlp = nn.Sequential(
-            nn.Linear(swin_feat_dim + color_feat_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_pigments)
-        )
-        
-        # Cultural prior weighting - learned weights for historical accuracy
-        self.cultural_prior = nn.Parameter(torch.ones(num_pigments))
-        
-        # Color name mapping for clustering results
-        self.color_centroids = {
-            'white': [0.9, 0.9, 0.9],
-            'red': [0.8, 0.1, 0.1],
-            'blue': [0.1, 0.2, 0.8],
-            'green': [0.1, 0.7, 0.2],
-            'yellow': [0.9, 0.8, 0.1],
-            'black': [0.1, 0.1, 0.1],
-            'brown': [0.6, 0.4, 0.2],
-            'purple': [0.5, 0.1, 0.5],
-            'orange': [0.9, 0.5, 0.1]
-        }
-        
-    def _rgb_to_color_name(self, rgb_values):
-        """Map RGB values to the closest named color"""
-        min_dist = float('inf')
-        closest_color = 'other'
-        
-        for color_name, centroid in self.color_centroids.items():
-            # Calculate Euclidean distance
-            dist = np.sqrt(sum([(a - b) ** 2 for a, b in zip(rgb_values, centroid)]))
-            if dist < min_dist:
-                min_dist = dist
-                closest_color = color_name
-                
-        return closest_color
-        
-    def forward(self, swin_features, color_histogram):
-        """
-        Predict pigment probability distribution from image features
-        """
-        # Check input dimensions and adapt if necessary
-        if swin_features.size(1) != self.swin_feat_dim:
-            # Apply feature adaptation to match expected dimensions
-            if swin_features.size(1) == 3:  # Simple RGB features
-                swin_features = self.feature_adapter(swin_features)
-            else:
-                # For other dimensions, use adaptive pooling
-                swin_features = F.adaptive_avg_pool1d(
-                    swin_features.unsqueeze(2), 
-                    self.swin_feat_dim
-                ).squeeze(2)
-        
-        # Ensure color_histogram has correct dimensions
-        if color_histogram.size(1) != 3*256:
-            # Apply reshaping or padding as necessary
-            if len(color_histogram.shape) == 1:
-                # If it's a 1D tensor, reshape to batch size 1
-                color_histogram = color_histogram.unsqueeze(0)
-            
-            # If wrong dimension, create a placeholder histogram
-            if color_histogram.size(1) != 3*256:
-                print(f"Warning: Color histogram has incorrect dimension {color_histogram.size(1)}, creating placeholder")
-                color_histogram = torch.zeros((swin_features.size(0), 3*256), device=swin_features.device)
-                # Add some random values to avoid all zeros
-                color_histogram = color_histogram + torch.rand_like(color_histogram) * 0.1
-        
-        # Extract color features
-        color_feat = self.color_encoder(color_histogram)
-        
-        # Concatenate features
-        joint_feat = torch.cat([swin_features, color_feat], dim=1)
-        
-        # Predict raw pigment logits
-        pigment_logits = self.joint_mlp(joint_feat)
-        
-        # Apply cultural/historical priors
-        weighted_logits = pigment_logits * self.cultural_prior
-        
-        # Convert to probability distribution
-        pigment_probs = F.softmax(weighted_logits, dim=1)
-        
-        return pigment_probs
-    
-    def apply_color_constraints(self, pigment_probs, dominant_color):
-        """
-        Apply constraints based on dominant color and historical usage
-        """
-        batch_size = pigment_probs.size(0)
-        constrained_probs = pigment_probs.clone()
-        
-        for b in range(batch_size):
-            color = dominant_color[b]
-            
-            # Get valid pigments for this color
-            valid_indices = self.pigment_db.get_pigments_by_color(color)
-            
-            if valid_indices:
-                # Create mask of valid pigments
-                mask = torch.zeros(self.num_pigments, device=pigment_probs.device)
-                mask[valid_indices] = 1.0
-                
-                # Apply mask and renormalize
-                constrained_probs[b] = pigment_probs[b] * mask
-                constrained_probs[b] = constrained_probs[b] / (constrained_probs[b].sum() + 1e-8)
-        
-        return constrained_probs
-    
-class PigmentValidationMetrics:
-    """
-    Comprehensive validation metrics for the pigment model, not fully implemented, need to add more
-    """
-    def __init__(self, historical_data_path=None):
-        # Load historical data if available. Not implemented yet, please comment here if you have any ideas...
-        self.historical_data = None
-        if historical_data_path and os.path.exists(historical_data_path):
-            with open(historical_data_path, 'r') as f:
-                self.historical_data = json.load(f)
-    
-    def compute_cultural_accuracy(self, predicted_pigments, region_info):
-        """
-        Validate pigment predictions against historical records
-        
-        Args:
-            predicted_pigments: Dict with pigment ids and probabilities
-            region_info: Information about the region (cave number, date, etc.)
-            
-        Returns:
-            Cultural accuracy score (0-1)
-        """
-        if self.historical_data is None or not region_info:
-            return None
-            
-        # Look up historical pigments for this region and period
-        period = region_info.get('period', 'unknown')
-        cave = region_info.get('cave', 'unknown')
-        
-        # Find matching historical record
-        historical_pigments = None
-        for record in self.historical_data:
-            if record['period'] == period and record['cave'] == cave:
-                historical_pigments = record['pigments']
-                break
-        
-        if not historical_pigments:
-            return None
-        
-        # Calculate accuracy based on historical pigment presence
-        correct = 0
-        total = 0
-        
-        # Get top predicted pigments
-        if isinstance(predicted_pigments, torch.Tensor):
-            pred_pigments = predicted_pigments.detach().cpu().numpy()
-        else:
-            pred_pigments = predicted_pigments
-            
-        top_pigments = np.argsort(pred_pigments)[-5:]  # Top 5 pigments
-        
-        # Check against historical records
-        for pigment_id in range(len(pred_pigments)):
-            is_predicted = pigment_id in top_pigments
-            is_historical = pigment_id in historical_pigments
-            
-            if is_predicted == is_historical:
-                correct += 1
-            total += 1
-        
-        return correct / total if total > 0 else 0.0
-    
-    def compute_spectral_similarity(self, pred_reflectance, gt_reflectance=None):
-        """
-        Compute similarity between predicted and ground truth reflectance
-        Even with RGB values, we can compute a basic similarity metric
-        
-        Args:
-            pred_reflectance: Predicted RGB reflectance
-            gt_reflectance: Ground truth RGB reflectance (if available, I think we can just use the original image? Not sure...)
-            
-        Returns:
-            Similarity score (0-1)
-        """
-        if gt_reflectance is None:
-            return None
-            
-        # Convert to numpy if needed
-        if isinstance(pred_reflectance, torch.Tensor):
-            pred_rgb = pred_reflectance.detach().cpu().numpy()
-        else:
-            pred_rgb = pred_reflectance
-            
-        if isinstance(gt_reflectance, torch.Tensor):
-            gt_rgb = gt_reflectance.detach().cpu().numpy()
-        else:
-            gt_rgb = gt_reflectance
-        
-        # Compute Euclidean distance in RGB space
-        rgb_distance = np.sqrt(np.sum((pred_rgb - gt_rgb) ** 2))
-        
-        # Convert to similarity score (0-1)
-        similarity = np.exp(-rgb_distance * 2)  # Exponential falloff
-        
-        return similarity
-    
-    def compute_aging_accuracy(self, pred_aging, gt_aging=None):
-        """
-        Compute accuracy of aging predictions
-        
-        Args:
-            pred_aging: Predicted aging effects
-            gt_aging: Ground truth aging data (if available. This is the most confusing part, I think we should research more on chemstry papers)
-            
-        Returns:
-            Aging accuracy score (0-1)
-        """
-        if gt_aging is None:
-            return None
-            
-        # Extract aging components
-        if isinstance(pred_aging, dict):
-            pred_yellowing = pred_aging.get('yellowing', 0)
-            pred_darkening = pred_aging.get('darkening', 0)
-            pred_fading = pred_aging.get('fading', 0)
-        else:
-            # Default extraction if not in dict format
-            pred_yellowing = pred_darkening = pred_fading = pred_aging
-        
-        # Same for ground truth
-        if isinstance(gt_aging, dict):
-            gt_yellowing = gt_aging.get('yellowing', 0)
-            gt_darkening = gt_aging.get('darkening', 0)
-            gt_fading = gt_aging.get('fading', 0)
-        else:
-            gt_yellowing = gt_darkening = gt_fading = gt_aging
-        
-        # Convert to numpy if needed
-        if isinstance(pred_yellowing, torch.Tensor):
-            pred_yellowing = pred_yellowing.detach().cpu().numpy()
-        if isinstance(pred_darkening, torch.Tensor):
-            pred_darkening = pred_darkening.detach().cpu().numpy()
-        if isinstance(pred_fading, torch.Tensor):
-            pred_fading = pred_fading.detach().cpu().numpy()
-        
-        # Compute mean absolute error for each component
-        yellowing_error = np.mean(np.abs(pred_yellowing - gt_yellowing))
-        darkening_error = np.mean(np.abs(pred_darkening - gt_darkening))
-        fading_error = np.mean(np.abs(pred_fading - gt_fading))
-        
-        # Compute overall error
-        total_error = (yellowing_error + darkening_error + fading_error) / 3
-        
-        # Convert to accuracy score (0-1)
-        accuracy = np.exp(-total_error * 5)  # Exponential falloff
-        
-        return accuracy
-    
-    def compute_all_metrics(self, predictions, ground_truth=None, region_info=None):
-        """
-        Compute all available validation metrics
-        
-        Args:
-            predictions: Model predictions
-            ground_truth: Ground truth data (if available)
-            region_info: Information about the region (if available)
-            
-        Returns:
-            Dictionary of validation metrics
-        """
-        metrics = {}
-        
-        # Extract prediction components
-        pigment_probs = predictions.get('pigment_probs', None)
-        reflectance = predictions.get('reflectance', None)
-        aging_effects = predictions.get('aging_effects', None)
-        
-        # Extract ground truth components if available
-        gt_pigments = None
-        gt_reflectance = None
-        gt_aging = None
-        
-        if ground_truth is not None:
-            gt_pigments = ground_truth.get('pigment_probs', None)
-            gt_reflectance = ground_truth.get('reflectance', None)
-            gt_aging = ground_truth.get('aging_effects', None)
-        
-        # Compute cultural accuracy
-        if pigment_probs is not None and region_info is not None:
-            metrics['cultural_accuracy'] = self.compute_cultural_accuracy(
-                pigment_probs, region_info
-            )
-        
-        # Compute spectral similarity
-        if reflectance is not None:
-            metrics['spectral_similarity'] = self.compute_spectral_similarity(
-                reflectance, gt_reflectance
-            )
-        
-        # Compute aging accuracy
-        if aging_effects is not None:
-            metrics['aging_accuracy'] = self.compute_aging_accuracy(
-                aging_effects, gt_aging
-            )
-        
-        return metrics
-
-class ThermodynamicValidator:    
-    """
-    Validates pigment mixtures for chemical stability based on materials science principles/
-    We need to continue updating this as we find more research papers.
-    """
-    def __init__(self, pigment_db):
-        self.pigment_db = pigment_db
-        
-        # Define incompatible pigment pairs (based on chemical reactivity)
-        # Format: (pigment1_id, pigment2_id, reason)
-        self.incompatible_pairs = [
-            # Lead white and sulfide-containing pigments
-            (3, 4, "Lead white reacts with sulfides in cinnabar"),
-            (3, 5, "Lead white reacts with sulfides in vermilion"),
-            
-            # Copper-based pigments and sulfides
-            (8, 4, "Copper-based azurite deteriorates with sulfide-containing pigments"),
-            (8, 5, "Copper-based azurite deteriorates with sulfide-containing pigments"),
-            (11, 4, "Copper-based malachite deteriorates with sulfide-containing pigments"),
-            (11, 5, "Copper-based malachite deteriorates with sulfide-containing pigments"),
-            
-            # Arsenic and copper-based pigments
-            (14, 8, "Orpiment can react with copper-based pigments"),
-            (14, 11, "Orpiment can react with copper-based pigments"),
-            (15, 8, "Realgar can react with copper-based pigments"),
-            (15, 11, "Realgar can react with copper-based pigments"),
-        ]
-        
-        # Define pH sensitivity for pigments
-        # Format: pigment_id: {"acid": sensitivity, "alkaline": sensitivity}
-        # where sensitivity is 0 (stable) to 1 (highly sensitive)
-        self.ph_sensitivity = {
-            3: {"acid": 0.8, "alkaline": 0.1},      # Lead white deteriorates in acidic environment
-            4: {"acid": 0.1, "alkaline": 0.1},      # Cinnabar is fairly stable
-            8: {"acid": 0.9, "alkaline": 0.1},      # Azurite deteriorates in acidic environment
-            11: {"acid": 0.7, "alkaline": 0.2},     # Malachite sensitive to acids
-            14: {"acid": 0.2, "alkaline": 0.6},     # Orpiment more sensitive to alkaline
-        }
-    
-    def check_mixture_stability(self, pigment_indices, mixing_ratios):
-        """
-        Check if a mixture of pigments is chemically stable
-        
-        Args:
-            pigment_indices: Tensor of pigment indices
-            mixing_ratios: Tensor of mixing ratios
-            
-        Returns:
-            Dictionary with stability information and warnings
-        """
-        # Convert to numpy if necessary
-        if isinstance(pigment_indices, torch.Tensor):
-            indices = pigment_indices.detach().cpu().numpy()
-        else:
-            indices = pigment_indices
-            
-        if isinstance(mixing_ratios, torch.Tensor):
-            ratios = mixing_ratios.detach().cpu().numpy()
-        else:
-            ratios = mixing_ratios
-        
-        # Initialize results
-        stability_score = 1.0  # Start with perfect stability
-        warnings = []
-        unstable_pairs = []
-        
-        # Check for incompatible pigment pairs
-        for i in range(len(indices)):
-            for j in range(i+1, len(indices)):
-                pigment1 = indices[i]
-                pigment2 = indices[j]
-                
-                # Skip if either pigment has negligible concentration
-                if ratios[i] < 0.05 or ratios[j] < 0.05:
-                    continue
-                
-                # Check if this pair is in the incompatible list
-                for p1, p2, reason in self.incompatible_pairs:
-                    if (pigment1 == p1 and pigment2 == p2) or (pigment1 == p2 and pigment2 == p1):
-                        # Calculate instability based on mixing ratios
-                        instability = min(ratios[i], ratios[j]) * 4.0
-                        stability_score -= instability * 0.4  # Reduce stability score
-                        stability_score = max(0.0, min(1.0, stability_score))
-                        
-                        # Add warning
-                        p1_name = self.pigment_db.id_to_name.get(pigment1, f"Pigment {pigment1}")
-                        p2_name = self.pigment_db.id_to_name.get(pigment2, f"Pigment {pigment2}")
-                        warnings.append(f"Incompatible pigments: {p1_name} and {p2_name}. {reason}")
-                        unstable_pairs.append((i, j))
-        
-        # Ensure stability score is in valid range
-        stability_score = max(0.0, min(1.0, stability_score))
-        
-        # Return results
-        return {
-            "stability_score": stability_score,
-            "warnings": warnings,
-            "unstable_pairs": unstable_pairs,
-            "is_stable": stability_score > 0.7  # Consider stable if score > 0.7, some research paper says 0.67, we just go with 0.7
-        }
-    
-    def suggest_corrections(self, pigment_indices, mixing_ratios):
-        """
-        Suggest corrections to improve stability of a pigment mixture
-        
-        Args:
-            pigment_indices: Tensor of pigment indices
-            mixing_ratios: Tensor of mixing ratios
-            
-        Returns:
-            Corrected mixing ratios and suggested alternatives
-        """
-        # First check stability
-        stability_info = self.check_mixture_stability(pigment_indices, mixing_ratios)
-        
-        # If already stable, return as is
-        if stability_info["is_stable"]:
-            return {
-                "corrected_ratios": mixing_ratios,
-                "suggested_alternatives": [],
-                "stability_info": stability_info
-            }
-        
-        # Convert to numpy if necessary
-        if isinstance(pigment_indices, torch.Tensor):
-            indices = pigment_indices.detach().cpu().numpy()
-        else:
-            indices = pigment_indices
-            
-        if isinstance(mixing_ratios, torch.Tensor):
-            ratios = mixing_ratios.detach().cpu().numpy().copy()  # Make a copy
-        else:
-            ratios = mixing_ratios.copy()  # Make a copy
-        
-        # Get unstable pairs
-        unstable_pairs = stability_info["unstable_pairs"]
-        
-        # Adjust ratios to minimize interaction
-        for i, j in unstable_pairs:
-            # Find the pigment with lower concentration
-            if ratios[i] <= ratios[j]:
-                minor_idx = i
-                major_idx = j
-            else:
-                minor_idx = j
-                major_idx = i
-            
-            # Reduce the minor pigment's concentration by 50%
-            ratios[minor_idx] *= 0.5
-            
-            # Suggest alternative pigments
-            pigment_to_replace = indices[minor_idx]
-            alternatives = self._suggest_alternative_pigments(pigment_to_replace, indices)
-        
-        # Renormalize ratios
-        ratios = ratios / np.sum(ratios)
-        
-        return {
-            "corrected_ratios": ratios,
-            "suggested_alternatives": alternatives,
-            "stability_info": self.check_mixture_stability(pigment_indices, ratios)
-        }
-    
-    def _suggest_alternative_pigments(self, pigment_id, current_mixture):
-        """
-        Suggest alternative pigments that are more compatible
-        
-        Args:
-            pigment_id: ID of the pigment to replace
-            current_mixture: Current mixture of pigments
-            
-        Returns:
-            List of suggested alternative pigments
-        """
-        # Get color group of the pigment
-        pigment_color = None
-        for p in self.pigment_db.pigments:
-            if self.pigment_db.name_to_id.get(p["name"]) == pigment_id:
-                pigment_color = p["color"]
-                break
-        
-        if not pigment_color:
-            return []
-        
-        # Get all pigments of the same color
-        same_color_pigments = self.pigment_db.get_pigments_by_color(pigment_color)
-        
-        # Filter out pigments already in the mixture and the one to replace
-        alternatives = [p for p in same_color_pigments if p not in current_mixture and p != pigment_id]
-        
-        # Check stability of each alternative with the current mixture
-        stable_alternatives = []
-        for alt in alternatives:
-            # Create a test mixture
-            test_mixture = [p for p in current_mixture if p != pigment_id] + [alt]
-            test_ratios = np.ones(len(test_mixture)) / len(test_mixture)
-            
-            # Check stability
-            stability = self.check_mixture_stability(test_mixture, test_ratios)
-            if stability["is_stable"]:
-                # Get name of alternative
-                alt_name = "Unknown"
-                for p in self.pigment_db.pigments:
-                    if self.pigment_db.name_to_id.get(p["name"]) == alt:
-                        alt_name = p["name"]
-                        break
-                
-                stable_alternatives.append({
-                    "id": alt,
-                    "name": alt_name,
-                    "stability_score": stability["stability_score"]
-                })
-        
-        # Sort by stability score
-        stable_alternatives.sort(key=lambda x: x["stability_score"], reverse=True)
-        
-        return stable_alternatives
-
-# ===== 4. Pigment Constraint Model with Mixing Stability =====
+# ===== Pigment Model with Realistic Physics =====
 class PigmentModel(nn.Module):
     """
-    Predicts optimal pigment mixing and application for image restoration based on Dunhuang 
-    mural research.
+    Advanced pigment model for historically accurate and physically realistic
+    simulation of Dunhuang mural pigments, integrating spectral rendering,
+    multi-layer painting techniques, and physical aging simulation.
     """
     def __init__(
         self, 
-        num_pigments=16,
+        num_pigments=35,
         feature_dim=768,
         hidden_dim=256,
-        k=3,
+        max_pigments_per_layer=5,
+        max_layers=3,
+        spectral_bands=10,
         in_chans=3
     ):
         super().__init__()
         self.num_pigments = num_pigments
         self.feature_dim = feature_dim
-        self.k = k
+        self.max_pigments_per_layer = max_pigments_per_layer
+        self.max_layers = max_layers
+        self.spectral_bands = spectral_bands
         self.in_chans = in_chans
+
+        # Initialize pigment-to-feature projectors
+        self.pigment_to_feature_projectors = nn.ModuleList([
+            nn.Linear(num_pigments, feature_dim) 
+            for _ in range(max_layers)
+        ])
+        
+        # Initialize enhanced versions of component modules
         self.pigment_db = DunhuangPigmentDB()
+        self.color_mapper = ColorToPigmentMapper(
+            feature_dim, 128, num_pigments, 
+            min_clusters=3, max_clusters=8
+        )
+        self.optical_properties = OpticalProperties(
+            num_pigments, pigment_embedding_dim=64, spectral_bands=spectral_bands
+        )
+        self.thermodynamic_validator = ThermodynamicValidator(self.pigment_db)
         
-        # Color to pigment mapping
-        self.color_mapper = ColorToPigmentMapper(feature_dim, 128, num_pigments)
+        # Feature extraction backbone
+        self.backbone = nn.Sequential(
+            nn.Conv2d(in_chans, 64, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
         
-        # Optical properties with Dunhuang data
-        self.optical_properties = OpticalProperties(num_pigments)
-        
-        # Feature to mixing ratio mapping
-        self.ratio_predictor = nn.Sequential(
+        # Layer structure predictor (predicts number of layers and their arrangement)
+        self.layer_structure_predictor = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_pigments),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, max_layers),
+            nn.Softmax(dim=-1)  # Probability distribution over possible layer counts
+        )
+        
+        # Pigment selection per layer
+        self.layer_pigment_predictor = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(feature_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(hidden_dim, num_pigments),
+                nn.Softmax(dim=-1)
+            ) for _ in range(max_layers)
+        ])
+        
+        # Mixing ratios per layer
+        self.layer_ratio_predictor = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(feature_dim*2, hidden_dim),  
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(hidden_dim, max_pigments_per_layer),
+                nn.Softmax(dim=-1)
+            ) for _ in range(max_layers)
+        ])
+        
+        # Binder prediction per layer
+        self.binder_predictor = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4),  # 4 binder types: animal_glue, gum_arabic, drying_oil, egg_tempera
             nn.Softmax(dim=-1)
         )
         
-        # Age predictor (estimates pigment age from image features)
+        # Age prediction (global for the painting)
         self.age_predictor = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()  # 0-1 normalized age
+        )
+        
+        # Environmental condition estimation
+        self.environmental_predictor = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4),  # humidity, light_exposure, air_pollutants, temperature_fluctuation
             nn.Sigmoid()
         )
         
-        # Map from optical properties back to RGB with separate inputs for clarity
-        self.rgb_mapper = nn.Sequential(
-            nn.Linear(3 + 1 + self.k, 32),  # reflectance(3) + roughness(1) + ratios(k)
-            nn.ReLU(),
-            nn.Linear(32, 64),
-            nn.ReLU(),
-            nn.Linear(64, 3),
+        # Physical renderer with spectral rendering capabilities
+        self.physical_renderer = nn.Sequential(
+            # Input: Image + spectral reflectance + binder properties
+            nn.Conv2d(in_chans + spectral_bands + 5, 64, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, in_chans, kernel_size=1),
             nn.Sigmoid()
         )
-
-        # Initialize validators
-        self.thermodynamic_validator = ThermodynamicValidator(self.pigment_db)
-        self.validation_metrics = PigmentValidationMetrics()   # Note this is not implemented yet!
+        
+        # Layer blending and interaction model
+        self.layer_interaction_model = nn.Sequential(
+            nn.Conv2d(in_chans * self.max_layers, 128, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, in_chans, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Refinement network for final adjustments
+        self.refinement_network = nn.Sequential(
+            nn.Conv2d(in_chans * 2, 64, kernel_size=3, padding=1),  # Input + rendered
+            nn.InstanceNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, in_chans, kernel_size=1),
+            nn.Sigmoid()
+        )
         
         # Color histogram generator
         self.color_histogram_generator = nn.Sequential(
@@ -1088,428 +175,1198 @@ class PigmentModel(nn.Module):
             nn.Linear(64*16*16, 3*256)  # 256 bins per RGB channel
         )
         
-        # Layer decomposition module
-        self.layer_decomposition = nn.Sequential(
-            nn.Conv2d(in_chans, 32, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, in_chans, kernel_size=1)
-        )
+        # Binder type mapping
+        self.binder_types = ["animal_glue", "gum_arabic", "drying_oil", "egg_tempera"]
         
-        # Physical pigment rendering module
-        self.physical_renderer = nn.Sequential(
-            nn.Conv2d(in_chans + 5, 32, kernel_size=3, padding=1),  # + 5 for pigment properties
-            nn.InstanceNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, in_chans, kernel_size=1)
-        )
-        
-        # Final adjustment module
-        self.final_adjustment = nn.Sequential(
-            nn.Conv2d(in_chans * 2, 32, kernel_size=3, padding=1),  # Initial + Refined
-            nn.InstanceNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, in_chans, kernel_size=1)
-        )
+        # Initialize feature adapter for various input dimensions
+        self.feature_adapter = nn.Linear(3, feature_dim)
     
-    def detect_dominant_colors(self, x):
-        """Detect dominant colors using K-means clustering for pigment model"""
-        batch_size = x.shape[0]
-        colors = []
+    def _extract_features(self, image):
+        """Extract deep features from image"""
+        # Process through backbone
+        features = self.backbone(image)
         
-        # Process each image in the batch
-        for b in range(batch_size):
-            img = x[b].detach().cpu().numpy()  # [3, H, W]
-            
-            # Reshape to pixels
-            pixels = img.transpose(1, 2, 0).reshape(-1, 3)  # [H*W, 3]
-            
-            # Sample pixels for efficiency
-            sample_size = min(1000, pixels.shape[0])
-            indices = np.random.choice(pixels.shape[0], sample_size, replace=False)
-            pixel_sample = pixels[indices]
-            
-            # Use K-means clustering to find dominant colors
-            kmeans = KMeans(n_clusters=3, random_state=42)
-            kmeans.fit(pixel_sample)
-            
-            # Find the most common cluster
-            cluster_labels = kmeans.predict(pixel_sample)
-            most_common_cluster = np.argmax(np.bincount(cluster_labels))
-            
-            # Get the centroid of the most common cluster
-            dominant_color = kmeans.cluster_centers_[most_common_cluster]
-            
-            # Map to color name using pigment database
-            color_name = self._rgb_to_color_name(dominant_color)
-            colors.append(color_name)
+        # Flatten spatial dimensions
+        return features.reshape(features.size(0), -1)
+    
+    def _generate_color_histogram(self, image):
+        """Generate color histogram from image"""
+        return self.color_histogram_generator(image)
+    
+    def _adapt_features(self, features):
+        """Adapt features to expected dimension"""
+        if features.size(1) != self.feature_dim:
+            if features.size(1) == 3: 
+                adapted_features = self.feature_adapter(features)
+            else:
+                features_3d = features.unsqueeze(-1)
+                pooled_features = F.adaptive_avg_pool1d(features_3d, self.feature_dim)
+                adapted_features = pooled_features.squeeze(-1)
+                # Make sure we return a 2D tensor [batch, feature_dim]
+                print("Adapted features shape in AdaptFeatures function:", adapted_features.shape)
+            return adapted_features
+        return features
+    
+    def _predict_painting_structure(self, features):
+        """Predict painting layer structure from image features"""
+        # Predict layer probabilities
+        layer_probs = self.layer_structure_predictor(features)
         
-        return colors
-
-    def _rgb_to_color_name(self, rgb_values):
-        """Map RGB values to color names defined in the Dunhuang pigment system"""
-        # Use the color mapping from the pigment database, we can add more centers if have more research papers
-        color_map = {
-            'white': [0.9, 0.9, 0.9],
-            'red': [0.8, 0.2, 0.2],
-            'blue': [0.2, 0.2, 0.8],
-            'green': [0.2, 0.7, 0.2],
-            'yellow': [0.9, 0.8, 0.2]
+        # Determine number of layers (weighted average or highest prob)
+        # For deterministic results, use argmax
+        num_layers = torch.argmax(layer_probs, dim=1) + 1  # +1 because layers start from 1
+        
+        return {
+            'layer_probs': layer_probs,
+            'num_layers': num_layers
+        }
+    
+    def _predict_layer_pigments(self, features, num_layers, pigment_analysis=None):
+        """
+        Predict pigments for each layer, considering ColorToPigmentMapper suggestions
+        
+        Args:
+            features: Image features [batch_size, feature_dim]
+            num_layers: Number of layers for each sample [batch_size]
+            pigment_analysis: Optional results from ColorToPigmentMapper
+            
+        Returns:
+            Dictionary with layer pigment data
+        """
+        batch_size = features.size(0)
+        max_layers = min(num_layers.max().item(), self.max_layers)
+        
+        # Initialize storage for results
+        layer_pigments = []
+        layer_ratios = []
+        
+        # Process each layer
+        for layer_idx in range(max_layers):
+            # Get base pigment distribution from neural network
+            base_pigment_probs = self.layer_pigment_predictor[layer_idx](features)
+            
+            # If we have ColorToPigmentMapper results, blend them with the base probabilities
+            if pigment_analysis is not None:
+                # Blend the probabilities (with weight toward ColorToPigmentMapper suggestions)
+                blend_weight = 0.7  # 70% from ColorToPigmentMapper, 30% from base prediction
+                
+                for b in range(batch_size):
+                    if 'pigment_probabilities' in pigment_analysis:
+                        mapper_probs = pigment_analysis['pigment_probabilities'][b]
+                        base_pigment_probs[b] = (1 - blend_weight) * base_pigment_probs[b] + blend_weight * mapper_probs
+            
+            # Select top-k pigments for this layer
+            top_probs, top_indices = torch.topk(
+                base_pigment_probs, self.max_pigments_per_layer, dim=1
+            )
+            
+            # For layers beyond a sample's layer count, mask out
+            layer_mask = (layer_idx < num_layers).float().unsqueeze(1)
+            
+            # Project pigment probabilities to match feature dimensions
+            projected_pigments = self.pigment_to_feature_projectors[layer_idx](base_pigment_probs)
+            
+            # Create input for ratio prediction - just concatenate features and projected pigments
+            ratio_input = torch.cat([features, projected_pigments], dim=1)
+            
+            # Predict mixing ratios for these pigments
+            mixing_ratios = self.layer_ratio_predictor[layer_idx](ratio_input)
+            
+            # Apply mask for valid layers
+            masked_indices = top_indices * layer_mask.long()
+            masked_ratios = mixing_ratios * layer_mask
+            
+            layer_pigments.append(masked_indices)
+            layer_ratios.append(masked_ratios)
+        
+        # Stack results
+        layer_pigments = torch.stack(layer_pigments, dim=1)  # [batch, layers, max_pigments]
+        layer_ratios = torch.stack(layer_ratios, dim=1)      # [batch, layers, max_pigments]
+        
+        return {
+            'layer_pigments': layer_pigments,
+            'layer_ratios': layer_ratios,
+        }
+    
+    def _predict_binders_and_conditions(self, features):
+        """Predict binder types and environmental conditions"""
+        # Predict binder probabilities
+        binder_probs = self.binder_predictor(features)
+        
+        # Get most likely binder for each sample
+        binder_indices = torch.argmax(binder_probs, dim=1)
+        
+        # Convert to named binders
+        binder_names = [self.binder_types[idx.item()] for idx in binder_indices]
+        
+        # Predict environmental conditions
+        env_conditions = self.environmental_predictor(features)
+        
+        # Create dictionary of named conditions
+        condition_names = ['humidity', 'light_exposure', 'air_pollutants', 'temperature_fluctuation']
+        env_dict = {
+            name: env_conditions[:, i] for i, name in enumerate(condition_names)
         }
         
-        min_dist = float('inf')
-        closest_color = 'other'
+        # Predict age factor
+        age_factor = self.age_predictor(features).squeeze(-1)
         
-        for color_name, color_rgb in color_map.items():
-            # Calculate Euclidean distance
-            dist = np.sqrt(np.sum((np.array(rgb_values) - np.array(color_rgb)) ** 2))
-            if dist < min_dist:
-                min_dist = dist
-                closest_color = color_name
-        
-        return closest_color
+        return {
+            'binder_probs': binder_probs,
+            'binder_indices': binder_indices,
+            'binder_names': binder_names,
+            'env_conditions': env_dict,
+            'age_factor': age_factor
+        }
     
-    def _extract_pigment_features(self, image):
-        """Extract features for pigment analysis"""
-        # We just use simple feature extraction, we can replace it with more advanced methods, but this should be good enough
-        pooled_features = F.adaptive_avg_pool2d(self.layer_decomposition(image), 1).squeeze(-1).squeeze(-1)
-
-        if hasattr(self, 'feature_extractor'): # Future work
-            return self.feature_extractor(image)
-        return pooled_features
+    def _validate_mixture_stability(self, layer_data, binder_names, env_conditions):
+        """Validate stability of pigment mixtures in each layer"""
+        batch_size = layer_data['layer_pigments'].size(0)
+        num_layers = layer_data['layer_pigments'].size(1)
+        
+        stability_results = []
+        
+        # Process each sample in batch
+        for b in range(batch_size):
+            layer_results = []
+            
+            # Process each layer
+            for layer_idx in range(num_layers):
+                # Get pigments and ratios for this layer
+                pigments = layer_data['layer_pigments'][b, layer_idx]
+                ratios = layer_data['layer_ratios'][b, layer_idx]
+                
+                # Skip if all zeros (inactive layer)
+                if torch.all(pigments == 0):
+                    continue
+                
+                # Validate stability
+                stability = self.thermodynamic_validator.check_mixture_stability(
+                    pigments.detach().cpu().numpy(),
+                    ratios.detach().cpu().numpy(),
+                    binder_type=binder_names[b],
+                    environmental_conditions={
+                        k: v[b].item() for k, v in env_conditions.items()
+                    }
+                )
+                
+                # If unstable, get recommendations
+                if not stability["is_stable"]:
+                    corrections = self.thermodynamic_validator.suggest_corrections(
+                        pigments.detach().cpu().numpy(),
+                        ratios.detach().cpu().numpy(),
+                        binder_type=binder_names[b],
+                        environmental_conditions={
+                            k: v[b].item() for k, v in env_conditions.items()
+                        }
+                    )
+                    
+                    # Add correction suggestions
+                    stability["corrections"] = corrections
+                    
+                    # Apply corrections to ratios if available
+                    if "corrected_ratios" in corrections:
+                        corrected = torch.tensor(
+                            corrections["corrected_ratios"],
+                            device=ratios.device,
+                            dtype=ratios.dtype
+                        )
+                        
+                        # Update the ratios in-place
+                        layer_data['layer_ratios'][b, layer_idx] = corrected
+                
+                layer_results.append({
+                    'layer_idx': layer_idx,
+                    'stability': stability
+                })
+            
+            # Also check multi-layer interactions
+            layer_pigments = []
+            for layer_idx in range(num_layers):
+                if not torch.all(layer_data['layer_pigments'][b, layer_idx] == 0):
+                    layer_pigments.append(
+                        layer_data['layer_pigments'][b, layer_idx].detach().cpu().numpy().tolist()
+                    )
+            
+            if len(layer_pigments) > 1:
+                layer_analysis = self.thermodynamic_validator.analyze_painted_layers(
+                    layer_pigments,
+                    [binder_names[b]] * len(layer_pigments)
+                )
+                
+                stability_results.append({
+                    'layer_results': layer_results,
+                    'layer_interaction_analysis': layer_analysis
+                })
+            else:
+                stability_results.append({
+                    'layer_results': layer_results,
+                    'layer_interaction_analysis': None
+                })
+        
+        return {
+            'stability_results': stability_results,
+            'updated_layer_data': layer_data
+        }
+    
+    def _render_pigment_layers(self, image, layer_data, age_factor, env_conditions, years=100):
+        """Render each pigment layer with physically-based simulation"""
+        batch_size = image.size(0)
+        num_layers = layer_data['layer_pigments'].size(1)
+        
+        rendered_layers = []
+        
+        # Render each layer
+        for layer_idx in range(num_layers):
+            layer_pigments = []
+            
+            # Process each sample
+            for b in range(batch_size):
+                # Get pigments and ratios for this sample's layer
+                pigments = layer_data['layer_pigments'][b, layer_idx]
+                ratios = layer_data['layer_ratios'][b, layer_idx]
+                
+                # Skip if all zeros (inactive layer)
+                if torch.all(pigments == 0):
+                    # Create blank layer
+                    blank = torch.zeros_like(image[b:b+1])
+                    layer_pigments.append(blank)
+                    continue
+                
+                # Step 1: Generate aging spectral data using ThermodynamicValidator
+                aging_data = self.thermodynamic_validator.generate_spectral_aging_data(
+                    pigments, 
+                    ratios,
+                    years=years,
+                    spectral_bands=self.spectral_bands,
+                    environmental_conditions={
+                        k: v[b].item() for k, v in env_conditions.items()
+                    }
+                )
+                
+                # Step 2: Get optical properties without aging (base properties)
+                optical_props = self.optical_properties(
+                    pigments, 
+                    ratios
+                )
+                
+                # Step 3: Apply pre-computed aging to optical properties
+                aged_spectral = aging_data['aged_spectral']
+                if isinstance(aged_spectral, np.ndarray):
+                    aged_spectral = torch.tensor(aged_spectral, device=pigments.device)
+                
+                # Get RGB with aging applied
+                aged_rgb = self.optical_properties.apply_spectral_aging(
+                    optical_props['spectral'],
+                    aged_spectral
+                )
+                
+                # Extract properties for rendering
+                spectral = aged_spectral              # [spectral_bands]
+                rgb = aged_rgb                        # [3]
+                surface_props = optical_props['surface_props']  # [3]
+                
+                # Create rendering parameters
+                render_params = torch.cat([
+                    spectral.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(1, -1, image.size(2), image.size(3)),
+                    surface_props.unsqueeze(-1).unsqueeze(-1).expand(1, -1, image.size(2), image.size(3)),
+                    age_factor[b:b+1].view(1, 1, 1, 1).expand(1, -1, image.size(2), image.size(3))
+                ], dim=1)
+                
+                # Create similarity map between this layer's color and the input image
+                similarity = self._compute_color_similarity(
+                    image[b:b+1],
+                    rgb.view(1, 3, 1, 1)
+                )
+                
+                # Initialize this layer with similarity-weighted image
+                layer_init = image[b:b+1] * similarity
+                
+                # Concatenate for rendering
+                render_input = torch.cat([layer_init, render_params], dim=1)
+                
+                # Apply physical renderer
+                rendered = self.physical_renderer(render_input)
+                
+                layer_pigments.append(rendered)
+            
+            # Stack batch results for this layer
+            if layer_pigments:
+                rendered_layer = torch.cat(layer_pigments, dim=0)
+                rendered_layers.append(rendered_layer)
+        
+        # Apply layer interactions model
+        if rendered_layers:
+            # Pad with blank layers if needed
+            while len(rendered_layers) < self.max_layers:
+                rendered_layers.append(torch.zeros_like(image))
+            
+            # Stack layers along channel dimension
+            stacked_layers = torch.cat(rendered_layers, dim=1)
+            
+            # Process through layer interaction model
+            composite = self.layer_interaction_model(stacked_layers)
+        else:
+            # Fallback if no valid layers
+            composite = torch.zeros_like(image)
+        
+        # Apply final refinement
+        refined = self.refinement_network(torch.cat([image, composite], dim=1))
+        
+        return {
+            'rendered_layers': rendered_layers,
+            'composite': composite,
+            'refined': refined
+        }
     
     def _compute_color_similarity(self, image, reference_color):
-        """Compute color similarity between image and reference color"""
-        # Calculate color difference using Gaussian RBF kernel
+        """Compute color similarity using Gaussian RBF kernel"""
+        # Calculate squared difference
         diff = torch.sum((image - reference_color)**2, dim=1, keepdim=True)
-        sigma = 0.1     # Adjustable parameter for softness
+        
+        # Apply RBF kernel with adaptive sigma
+        sigma = 0.15  # Adjustable parameter for softness
         similarity = torch.exp(-diff / (2 * sigma**2))
         
         return similarity
     
-    def _decompose_to_pigment_layers(self, image, pigment_info):
-        """Decompose image into separate pigment layers"""
-        batch_size = image.shape[0]
-        k = pigment_info['top_pigments'].shape[1]  # Number of pigments
-        layers = []
+    def _simulate_aging(self, layer_data, binder_names, env_conditions, years=100):
+        """Simulate aging effects over specified time period"""
+        batch_size = layer_data['layer_pigments'].size(0)
         
-        # Get color centroids for each pigment
-        for i in range(k):
-            pigment_indices = pigment_info['top_pigments'][:, i]
-            
-            # Get reference colors for each pigment
-            ref_colors = []
-            for b in range(batch_size):
-                pigment_id = pigment_indices[b].item()
-                if pigment_id < len(self.pigment_db.pigments):
-                    ref_color = torch.tensor(self.pigment_db.pigments[pigment_id]["reflectance"])
-                    ref_colors.append(ref_color)
-                else:
-                    # Fallback if the given image has colors not in the database, should be rare
-                    ref_colors.append(torch.tensor([0.5, 0.5, 0.5]))
-            
-            ref_colors = torch.stack(ref_colors).to(image.device).view(batch_size, 3, 1, 1)
-            
-            # Create color similarity mask
-            similarity = self._compute_color_similarity(image, ref_colors)
-            
-            # Extract layer using soft segmentation
-            layer = image * similarity
-            layers.append(layer)
+        aging_results = []
         
-        return layers
-    
-    def _apply_pigment_physics(self, layer, pigment_id, age_factor, roughness, batch_idx=0):
-        """Apply physical properties to pigment layer"""
-        # Get pigment data
-        if pigment_id < len(self.pigment_db.pigments):
-            pigment = self.pigment_db.pigments[pigment_id]
-        else:
-            # Fallback to default pigment properties
-            pigment = {
-                "reflectance": [0.5, 0.5, 0.5],
-                "roughness": 0.5,
-                "aging": {"yellowing": 0.2, "darkening": 0.2, "fading": 0.2},
-                "particle_size": {"mean": 5.0, "std": 1.0}
-            }
-        
-        # Create property tensor for physical rendering
-        # [reflectance(3), roughness(1), age(1)]
-        age = age_factor[batch_idx].item()
-        props = torch.cat([
-            torch.tensor(pigment["reflectance"]).to(layer.device).view(1, 3, 1, 1),
-            torch.tensor([pigment["roughness"]]).to(layer.device).view(1, 1, 1, 1),
-            torch.tensor([age]).to(layer.device).view(1, 1, 1, 1)
-        ], dim=1)
-        
-        # Concatenate properties with layer for conditioning
-        conditioned = torch.cat([layer, props.expand(-1, -1, layer.shape[2], layer.shape[3])], dim=1)
-        
-        # Apply physical rendering
-        rendered = self.physical_renderer(conditioned)
-        
-        # Apply aging effects
-        yellowing = pigment["aging"]["yellowing"] * age
-        darkening = pigment["aging"]["darkening"] * age
-        fading = pigment["aging"]["fading"] * age
-        
-        # Create aging mask
-        aging_mask = torch.tensor([
-            1.0 + yellowing - darkening,        # Red channel
-            1.0 + yellowing * 0.6 - darkening,  # Green channel
-            1.0 - yellowing * 0.4 - darkening   # Blue channel
-        ]).to(layer.device).view(1, 3, 1, 1)
-        
-        # Apply aging
-        aged = rendered * aging_mask
-        
-        # Apply fading (shift toward white)
-        faded = aged + fading * (1.0 - aged)
-        
-        return torch.clamp(faded, 0, 1)
-    
-    def _physically_mix_layers(self, layers, ratios):
-        """Mix pigment layers using physical pigment mixing rules"""
-        batch_size = layers[0].shape[0]
-        
-        # Start with black canvas
-        mixed = torch.zeros_like(layers[0])
-        
-        # Apply simplified Kubelka-Munk theory (We can apply more accurate Kubelka-Munk theory later if have time)
-        for i, layer in enumerate(layers):
-            ratio = ratios[:, i].view(batch_size, 1, 1, 1)
-            
-            # Absorption coefficient (simplified)
-            K = 1.0 - layer
-            
-            # Scattering coefficient (simplified)
-            S = layer
-            
-            # Apply mixing with concentration-dependent weights
-            mixed = mixed + (layer * ratio) - (mixed * layer * ratio * 0.5)
-        
-        return torch.clamp(mixed, 0, 1)
-    
-    def _apply_particle_size_effects(self, reflectance, roughness, particle_data):
-        """
-        Just for testing purpose.
-        """
-        return self.optical_properties._apply_particle_size_effects(
-            reflectance, roughness, particle_data
-        )
-    
-    def _final_adjustment(self, refined_image, initial_image):
-        """Apply final adjustment to ensure natural appearance"""
-        # Combine initial and refined images
-        combined = torch.cat([initial_image, refined_image], dim=1)
-        
-        # Apply final adjustment network
-        adjusted = self.final_adjustment(combined)
-        
-        return torch.clamp(adjusted, 0, 1)
-
-    def _adapt_features(self, features):
-        """Adapt features to the expected dimension"""
-        # Check if features need adaptation
-        if features.size(1) != self.feature_dim:
-            print(f"Adapting features from shape {features.shape} to feature_dim {self.feature_dim}")
-            
-            # If simple RGB features (3 dimensions)
-            if features.size(1) == 3:
-                if not hasattr(self, 'feature_adapter'):
-                    self.feature_adapter = nn.Linear(3, self.feature_dim).to(features.device)
-                adapted_features = self.feature_adapter(features)
-            else:
-                # For other dimensions
-                adapted_features = F.adaptive_avg_pool1d(
-                    features.unsqueeze(2), 
-                    self.feature_dim
-                ).squeeze(2)
-            
-            return adapted_features
-        
-        # Return original features if already correct dimension
-        return features
- 
-    def forward(self, features, color_histogram, dominant_color=None):
-        """
-        Predict pigment properties from image features with historical accuracy for Dunhuang murals.
-        """
-        batch_size = features.shape[0]
-        features = self._adapt_features(features)
-        
-        # Predict pigment probabilities
-        pigment_probs = self.color_mapper(features, color_histogram)
-        
-        # Apply color constraints if dominant color is provided
-        if dominant_color is not None:
-            pigment_probs = self.color_mapper.apply_color_constraints(pigment_probs, dominant_color)
-        
-        # Predict mixing ratios
-        mixing_ratios = self.ratio_predictor(features)
-        
-        # Predict age factor
-        age_factor = self.age_predictor(features).squeeze(-1)  # [batch_size]
-        
-        # Combine probabilities and mixing ratios for final pigment distribution
-        # Add small epsilon to avoid zero values (improved stability)
-        final_pigment_dist = (pigment_probs * mixing_ratios) + 1e-6
-        final_pigment_dist = final_pigment_dist / final_pigment_dist.sum(dim=1, keepdim=True)
-        
-        # Get top-k pigments
-        top_probs, top_indices = torch.topk(final_pigment_dist, self.k, dim=1)
-        
-        # Normalize top-k probabilities
-        normalized_probs = top_probs / top_probs.sum(dim=1, keepdim=True)
-        
-        # Get optical properties for top pigments
-        props = self.optical_properties(top_indices, age_factor)
-        
-        # Extract reflectance and roughness
-        reflectance = props['reflectance']  # [batch_size, k, 3]
-        roughness = props['roughness']      # [batch_size, k, 1]
-
-        # Apply particle size effects
-        batch_size = top_indices.size(0)
+        # Process each sample
         for b in range(batch_size):
-            for i in range(self.k):
-                pigment_id = top_indices[b, i].item()
-                if pigment_id < len(self.pigment_db.pigments):
-                    pigment = self.pigment_db.pigments[pigment_id]
-                    if 'particle_size' in pigment:
-                        # Apply particle size effects to individual pigment
-                        ref, rough = self._apply_particle_size_effects(
-                            reflectance[b, i], 
-                            roughness[b, i],
-                            pigment['particle_size']
-                        )
-                        reflectance[b, i] = ref
-                        roughness[b, i] = rough
-
-        # Validate stability of pigment mixtures
-        stability_info = []
-        for b in range(batch_size):
-            # Check thermodynamic stability
-            stability = self.thermodynamic_validator.check_mixture_stability(
-                top_indices[b], normalized_probs[b]
-            )
+            layer_aging = []
             
-            # If unstable, get corrections
-            if not stability["is_stable"]:
-                corrections = self.thermodynamic_validator.suggest_corrections(
-                    top_indices[b], normalized_probs[b]
+            # Process each layer
+            for layer_idx in range(layer_data['layer_pigments'].size(1)):
+                # Get pigments and ratios
+                pigments = layer_data['layer_pigments'][b, layer_idx]
+                ratios = layer_data['layer_ratios'][b, layer_idx]
+                
+                # Skip if all zeros (inactive layer)
+                if torch.all(pigments == 0):
+                    continue
+                
+                # Simulate aging
+                aging = self.thermodynamic_validator.simulate_aging_effects(
+                    pigments.detach().cpu().numpy(),
+                    ratios.detach().cpu().numpy(),
+                    years=years,
+                    environmental_conditions={
+                        k: v[b].item() for k, v in env_conditions.items()
+                    }
                 )
                 
-                # Apply corrections if available
-                if "corrected_ratios" in corrections and len(corrections["corrected_ratios"]) == len(normalized_probs[b]):
-                    corrected_ratios = torch.tensor(
-                        corrections["corrected_ratios"], 
-                        device=normalized_probs.device, 
-                        dtype=normalized_probs.dtype
-                    )
-                    normalized_probs[b] = corrected_ratios
+                layer_aging.append({
+                    'layer_idx': layer_idx,
+                    'aging_simulation': aging
+                })
             
-            stability_info.append(stability)
+            aging_results.append(layer_aging)
         
-        # Calculate weighted reflectance (mixed pigments)
-        weighted_reflectance = reflectance * normalized_probs.unsqueeze(-1)
-        mixed_reflectance = torch.sum(weighted_reflectance, dim=1)  # [batch_size, 3]
+        return aging_results
+    
+    def forward(self, image=None, features=None, color_histogram=None):
+        """
+        Full pipeline for realistic physics-based pigment analysis and rendering
         
-        # Calculate weighted roughness
-        weighted_roughness = roughness * normalized_probs.unsqueeze(-1)
-        mixed_roughness = torch.sum(weighted_roughness, dim=1)  # [batch_size, 1]
+        Args:
+            image: Optional input image [B, C, H, W]
+            features: Optional pre-extracted features [B, D]
+            color_histogram: Optional pre-computed color histogram
+            
+        Returns:
+            Dictionary with comprehensive results
+        """
+        # Extract features if not provided
+        if features is None and image is not None:
+            features = self._extract_features(image)
+        elif features is None:
+            raise ValueError("Either image or features must be provided")
+            
+        # Adapt features to expected dimension
+        features = self._adapt_features(features)
         
-        # Combine properties for RGB mapping
-        rgb_input = torch.cat([
-            mixed_reflectance,      # [batch_size, 3]
-            mixed_roughness,        # [batch_size, 1]
-            normalized_probs        # [batch_size, k]
-        ], dim=-1)                  # [batch_size, 3+1+k]
+        # Generate color histogram if not provided
+        if color_histogram is None and image is not None:
+            color_histogram = self._generate_color_histogram(image)
         
-        # Map to RGB values
-        rgb_values = self.rgb_mapper(rgb_input)  # [batch_size, 3]
+        # Step 1: Use ColorToPigmentMapper to analyze image colors and get pigment suggestions
+        pigment_analysis = self.color_mapper.analyze_image_pigments(image, features)
+        
+        # Step 2: Analyze painting structure
+        structure = self._predict_painting_structure(features)
+        
+        # Step 3: Use pigment suggestions to inform layer prediction
+        # Incorporate color_mapper results into layer prediction
+        layer_data = self._predict_layer_pigments(features, structure['num_layers'], pigment_analysis)
+        
+        # Step 4: Predict binders and environmental conditions
+        binder_env_data = self._predict_binders_and_conditions(features)
+        
+        # Step 5: Validate stability of pigment mixtures
+        stability_data = self._validate_mixture_stability(
+            layer_data,
+            binder_env_data['binder_names'],
+            binder_env_data['env_conditions']
+        )
+        
+        # Update layer data with any stability corrections
+        layer_data = stability_data['updated_layer_data']
+        
+        # Step 6: Simulate aging effects
+        aging_simulation = self._simulate_aging(
+            layer_data,
+            binder_env_data['binder_names'],
+            binder_env_data['env_conditions'],
+            years=100  # Default simulation period
+        )
+        
+        # Step 7: Render pigment layers with physical simulation (if image provided)
+        if image is not None:
+            rendering = self._render_pigment_layers(
+                image,
+                layer_data,
+                binder_env_data['age_factor'],
+                binder_env_data['env_conditions'],
+                years=100
+            )
+        else:
+            rendering = None
+        
+        # Compile results
+        results = {
+            'pigment_analysis': pigment_analysis,  # Add ColorToPigmentMapper results
+            'structure': structure,
+            'layer_data': layer_data,
+            'binder_data': binder_env_data,
+            'stability_data': stability_data,
+            'aging_simulation': aging_simulation,
+            'rendering': rendering
+        }
+        
+        return results
+    
+    def analyze_image(self, image, simulation_years=100):
+        """
+        Comprehensive analysis of an image for pigment reconstruction
+        
+        Args:
+            image: Input image [B, C, H, W]
+            simulation_years: Years to simulate for aging effects
+            
+        Returns:
+            Analysis results with human-readable explanations
+        """
+        # Run the main model
+        results = self.forward(image)
+        
+        batch_size = image.size(0)
+        analysis = []
+        
+        # Generate analysis for each image
+        for b in range(batch_size):
+            # Get number of layers
+            num_layers = results['structure']['num_layers'][b].item()
+            
+            # Dominant pigments per layer
+            layer_pigments = []
+            for layer_idx in range(num_layers):
+                if layer_idx < results['layer_data']['layer_pigments'].size(1):
+                    pigments = results['layer_data']['layer_pigments'][b, layer_idx]
+                    ratios = results['layer_data']['layer_ratios'][b, layer_idx]
+                    
+                    # Get pigment names
+                    pigment_details = []
+                    for i in range(min(3, len(pigments))):  # Top 3 pigments
+                        if pigments[i].item() > 0:
+                            pigment_id = pigments[i].item()
+                            pigment_name = self.pigment_db.id_to_name.get(pigment_id, f"Pigment {pigment_id}")
+                            pigment_details.append({
+                                'name': pigment_name,
+                                'ratio': ratios[i].item(),
+                                'color': self._get_pigment_color(pigment_id)
+                            })
+                    
+                    layer_pigments.append({
+                        'layer': layer_idx + 1,
+                        'pigments': pigment_details
+                    })
+            
+            # Binder information
+            binder = results['binder_data']['binder_names'][b]
+            
+            # Stability analysis
+            if b < len(results['stability_data']['stability_results']):
+                stability = results['stability_data']['stability_results'][b]
+                stability_issues = []
+                
+                for layer_result in stability['layer_results']:
+                    layer_idx = layer_result['layer_idx']
+                    stability_data = layer_result['stability']
+                    
+                    if not stability_data.get('is_stable', True):
+                        warnings = stability_data.get('warnings', [])
+                        
+                        for warning in warnings:
+                            stability_issues.append({
+                                'layer': layer_idx + 1,
+                                'issue': warning,
+                                'severity': 'High' if 'stability_score' in stability_data and stability_data['stability_score'] < 0.5 else 'Medium'
+                            })
+                
+                if stability['layer_interaction_analysis']:
+                    for issue in stability['layer_interaction_analysis'].get('interlayer_issues', []):
+                        stability_issues.append({
+                            'layer': f"{issue['bottom_layer']+1} & {issue['top_layer']+1}",
+                            'issue': "Interlayer interaction issues detected",
+                            'severity': 'Medium'
+                        })
+            else:
+                stability_issues = []
+            
+            # Aging predictions
+            aging_issues = []
+            if b < len(results['aging_simulation']):
+                aging_data = results['aging_simulation'][b]
+                
+                for layer_aging in aging_data:
+                    layer_idx = layer_aging['layer_idx']
+                    simulation = layer_aging['aging_simulation']
+                    
+                    # Only report significant issues
+                    if simulation['condition_score'] < 0.6:
+                        aging_issues.append({
+                            'layer': layer_idx + 1,
+                            'condition': simulation['condition_rating'],
+                            'primary_effect': simulation['primary_effect'],
+                            'recommendation': simulation['recommendations'][0] if simulation['recommendations'] else "No specific recommendations"
+                        })
+            
+            # Rendering quality
+            rendering_quality = "High" if results['rendering'] and torch.mean(results['rendering']['refined']) > 0 else "N/A"
+            
+            # Compile analysis
+            analysis.append({
+                'num_layers': num_layers,
+                'pigment_analysis': layer_pigments,
+                'binder': binder,
+                'stability_issues': stability_issues,
+                'aging_issues': aging_issues,
+                'rendering_quality': rendering_quality,
+                'overall_recommendations': self._generate_recommendations(
+                    layer_pigments, stability_issues, aging_issues
+                )
+            })
         
         return {
-            'pigment_probs': final_pigment_dist,
-            'top_pigments': top_indices,
-            'selected_ratios': normalized_probs,
-            'reflectance': mixed_reflectance,
-            'roughness': mixed_roughness,
-            'rgb_values': rgb_values,
-            'age_factor': age_factor,
-            'stability_info': stability_info,
-            'validation_metrics': self.validation_metrics.compute_all_metrics(
-                {'pigment_probs': final_pigment_dist, 'reflectance': mixed_reflectance, 'aging_effects': props.get('aging_effects')},
-                None  # No ground truth available during inference
-            )
+            'detailed_results': results,
+            'analysis': analysis
         }
     
-    def process_image(self):
-        """Process the loaded image with manual analysis, this is just for temorary testing"""
-        if not hasattr(self, 'image_tensor'):
-            raise ValueError("No image loaded. Call load_image() first.")
+    def _get_pigment_color(self, pigment_id):
+        """Get color name for a pigment ID"""
+        for pigment in self.pigment_db.pigments:
+            if self.pigment_db.name_to_id.get(pigment["name"]) == pigment_id:
+                return pigment["color"]
+        return "unknown"
+    
+    def _generate_recommendations(self, layer_pigments, stability_issues, aging_issues):
+        """Generate overall recommendations based on analysis"""
+        recommendations = []
         
-        print("Analyzing image colors...")
+        # Check for stability issues
+        if stability_issues:
+            severe_issues = [issue for issue in stability_issues if issue['severity'] == 'High']
+            if severe_issues:
+                recommendations.append(
+                    "Consider reformulating the pigment mixture to address severe stability issues."
+                )
+            else:
+                recommendations.append(
+                    "Monitor for potential pigment interactions over time."
+                )
         
-        # Convert image to numpy for analysis
-        img_np = self.image_tensor.permute(1, 2, 0).numpy()
-        
-        # Extract dominant colors using K-means clustering
-        pixels = img_np.reshape(-1, 3)
-        sample_size = min(5000, pixels.shape[0])
-        indices = np.random.choice(pixels.shape[0], sample_size, replace=False)
-        pixel_sample = pixels[indices]
-        
-        # Find dominant colors
-        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-        kmeans.fit(pixel_sample)
-        
-        # Get cluster centers (dominant colors)
-        dominant_colors = kmeans.cluster_centers_
-        
-        # Map colors to pigments
-        top_pigments = []
-        selected_ratios = []
-        
-        for color in dominant_colors:
-            best_match = None
-            best_score = float('inf')
+        # Check for aging issues
+        if aging_issues:
+            # Get unique recommendations
+            aging_recs = set()
+            for issue in aging_issues:
+                if 'recommendation' in issue:
+                    aging_recs.add(issue['recommendation'])
             
-            # Find best matching pigment
-            for i, pigment in enumerate(self.pigment_db.pigments):
-                pigment_color = np.array(pigment["reflectance"])
-                distance = np.sum((color - pigment_color) ** 2)
-                
-                if distance < best_score:
-                    best_score = distance
-                    best_match = i
+            for rec in aging_recs:
+                recommendations.append(rec)
+        
+        # Add general recommendations if needed
+        if not recommendations:
+            recommendations.append(
+                "Pigment mixture appears stable and suitable for long-term preservation."
+            )
+        
+        return recommendations
+    
+    def generate_physics_report(self, analysis_results):
+        """
+        Generate comprehensive physics property report
+        
+        Args:
+            analysis_results: Results from the analysis process
             
-            top_pigments.append(best_match)
-            selected_ratios.append(1.0 / len(dominant_colors))  # Equal ratios
+        Returns:
+            Detailed report with physics properties and recommendations
+        """
+        # Extract key information
+        pigment_analysis = analysis_results.get('pigment_analysis', {})
+        layer_data = analysis_results.get('layer_data', {})
+        stability_data = analysis_results.get('stability_data', {})
+        aging_simulation = analysis_results.get('aging_simulation', [])
         
-        # Convert to tensors
-        top_pigments_tensor = torch.tensor(top_pigments)
-        selected_ratios_tensor = torch.tensor(selected_ratios)
-        
-        # Store results
-        self.results = {
-            'restored_image': self.image_tensor.unsqueeze(0),  # Just use original image
-            'initial_image': self.image_tensor.unsqueeze(0),
-            'pigment_info': {
-                'top_pigments': top_pigments_tensor.unsqueeze(0),
-                'selected_ratios': selected_ratios_tensor.unsqueeze(0),
-                'reflectance': torch.tensor(np.mean(dominant_colors, axis=0)).unsqueeze(0),
-                'roughness': torch.tensor([0.4]).unsqueeze(0),  # Default value
-                'age_factor': torch.tensor([0.5]).unsqueeze(0)  # Default value
-            },
-            'pigment_layers': [self.image_tensor.unsqueeze(0) * r for r in selected_ratios]
+        # Create comprehensive report
+        report = {
+            'title': "Dunhuang Mural Physics Analysis Report",
+            'sections': []
         }
         
-        print("Image analysis complete")
-        return self.results
+        # Section 1: Pigment Composition
+        pigment_section = {
+            'title': "Pigment Composition Analysis",
+            'content': "The image contains the following pigments based on historical Dunhuang mural practices:",
+            'subsections': []
+        }
+        
+        if 'pigment_suggestions' in pigment_analysis:
+            suggestions = pigment_analysis['pigment_suggestions']
+            for suggestion in suggestions[:5]:  # Top 5 suggestions
+                subsection = {
+                    'title': f"{suggestion['pigment_name']} ({suggestion['probability']:.2f})",
+                    'content': suggestion['explanation'],
+                    'properties': {
+                        'chemical_formula': self._get_pigment_formula(suggestion['pigment_id']),
+                        'color': self._get_pigment_color(suggestion['pigment_id']),
+                        'particle_size': self._get_pigment_particle_size(suggestion['pigment_id'])
+                    }
+                }
+                pigment_section['subsections'].append(subsection)
+        report['sections'].append(pigment_section)
+        
+        # Section 2: Layer Structure
+        layer_section = {
+            'title': "Layer Structure Analysis",
+            'content': "The painting consists of the following layers:",
+            'subsections': []
+        }
+        
+        # Add layer details
+        for b in range(len(analysis_results.get('analysis', []))):
+            analysis = analysis_results['analysis'][b]
+            for layer_info in analysis['pigment_analysis']:
+                layer_num = layer_info['layer']
+                layer_pigments = layer_info['pigments']
+                
+                subsection = {
+                    'title': f"Layer {layer_num}",
+                    'content': f"Contains {len(layer_pigments)} primary pigments",
+                    'pigments': [p['name'] for p in layer_pigments]
+                }
+                layer_section['subsections'].append(subsection)
+        report['sections'].append(layer_section)
+        
+        # Section 3: Stability Analysis
+        stability_section = {
+            'title': "Physical Stability Analysis",
+            'content': "The following stability issues were identified:",
+            'subsections': []
+        }
+        
+        # Add stability issues
+        for b in range(len(analysis_results.get('analysis', []))):
+            analysis = analysis_results['analysis'][b]
+            
+            if not analysis['stability_issues']:
+                stability_section['content'] = "No significant stability issues detected."
+            else:
+                for issue in analysis['stability_issues']:
+                    subsection = {
+                        'title': f"Layer {issue['layer']} Issue",
+                        'content': issue['issue'],
+                        'severity': issue['severity']
+                    }
+                    stability_section['subsections'].append(subsection)
+        report['sections'].append(stability_section)
+        
+        # Section 4: Aging Prediction
+        aging_section = {
+            'title': "Aging Prediction (100 Years)",
+            'content': "Based on physical simulation, the following aging effects are predicted:",
+            'subsections': []
+        }
+        
+        # Add aging predictions
+        for b in range(len(analysis_results.get('analysis', []))):
+            analysis = analysis_results['analysis'][b]
+            
+            if not analysis['aging_issues']:
+                aging_section['content'] = "The pigment mixture is predicted to age well with minimal deterioration."
+            else:
+                for issue in analysis['aging_issues']:
+                    subsection = {
+                        'title': f"Layer {issue['layer']} Aging",
+                        'content': f"Primary effect: {issue['primary_effect']}",
+                        'recommendation': issue['recommendation']
+                    }
+                    aging_section['subsections'].append(subsection)
+        report['sections'].append(aging_section)
+        
+        # Section 5: Preservation Recommendations
+        recommendations_section = {
+            'title': "Preservation Recommendations",
+            'content': "Based on the analysis, the following preservation measures are recommended:",
+            'recommendations': []
+        }
+        
+        # Add recommendations
+        for b in range(len(analysis_results.get('analysis', []))):
+            analysis = analysis_results['analysis'][b]
+            for rec in analysis['overall_recommendations']:
+                if rec not in recommendations_section['recommendations']:
+                    recommendations_section['recommendations'].append(rec)
+        report['sections'].append(recommendations_section)
+        
+        return report
+
+    def _get_pigment_formula(self, pigment_id):
+        """Get chemical formula for a pigment"""
+        for pigment in self.pigment_db.pigments:
+            if self.pigment_db.name_to_id.get(pigment["name"]) == pigment_id:
+                return pigment.get("formula", "Unknown")
+        return "Unknown"
+
+    def _get_pigment_particle_size(self, pigment_id):
+        """Get particle size information for a pigment"""
+        for pigment in self.pigment_db.pigments:
+            if self.pigment_db.name_to_id.get(pigment["name"]) == pigment_id:
+                if "particle_size" in pigment:
+                    return f"{pigment['particle_size']['mean']} {pigment['particle_size'].get('unit', 'micron')}"
+        return "Unknown"
+    
+
+
+if __name__ == "__main__":
+    # Initialize the model
+    model = PigmentModel(num_pigments=35, feature_dim=768, in_chans=3)
+    
+    # Set model to evaluation mode
+    model.eval()
+
+    def print_model_dimensions():
+        print("\n=== Model Dimensions ===")
+        # Check feature dimensions
+        print(f"Feature dimension: {model.feature_dim}")
+        
+        # Check layer predictor input dimensions
+        for i, layer in enumerate(model.layer_ratio_predictor):
+            first_linear = layer[0]  # Get first layer (Linear)
+            print(f"Layer {i} ratio predictor input dim: {first_linear.in_features}")
+            
+        # Check projector dimensions
+        for i, projector in enumerate(model.pigment_to_feature_projectors):
+            print(f"Layer {i} projector: in={projector.in_features}, out={projector.out_features}")
+
+    def test_simplified():
+        print("\n=== Simplified Test ===")
+    
+        # Create a simple test image
+        test_image = torch.zeros(1, 3, 64, 64)
+        test_image[0, 0, :32, :32] = 0.9  # Red in top-left
+        
+        with torch.no_grad():
+            # Extract features
+            features = model._extract_features(test_image)
+            print(f"Features shape: {features.shape}")
+
+            # Adapt features to expected dimension
+            features = model._adapt_features(features)
+            print(f"Adapted features shape: {features.shape}")
+            
+            # Test structure prediction
+            structure = model._predict_painting_structure(features)
+            print(f"Predicted layers: {structure['num_layers'].item()}")
+            
+            # Create dummy layer data to test other components
+            dummy_layer_data = {
+                'layer_pigments': torch.ones(1, 1, 5).long(),
+                'layer_ratios': torch.ones(1, 1, 5) / 5
+            }
+            
+            # Test binder prediction
+            binder_data = model._predict_binders_and_conditions(features)
+            print(f"Predicted binder: {binder_data['binder_names'][0]}")
+            
+            # Test stability validation
+            try:
+                stability = model._validate_mixture_stability(
+                    dummy_layer_data,
+                    binder_data['binder_names'],
+                    binder_data['env_conditions']
+                )
+                print("Stability validation successful")
+            except Exception as e:
+                print(f"Stability validation error: {str(e)}")
+            
+            # Test aging simulation
+            try:
+                aging = model._simulate_aging(
+                    dummy_layer_data,
+                    binder_data['binder_names'],
+                    binder_data['env_conditions']
+                )
+                print("Aging simulation successful")
+            except Exception as e:
+                print(f"Aging simulation error: {str(e)}")
+        
+        return "Simplified test completed"
+    
+    # Test 1: Basic functionality test
+    def test_basic_functionality():
+        print("\n=== Test 1: Basic Functionality ===")
+        
+        # Create a simple test image
+        test_image = torch.zeros(1, 3, 64, 64)
+        # Red area in top-left
+        test_image[0, 0, :32, :32] = 0.9
+        # Blue area in bottom-right
+        test_image[0, 2, 32:, 32:] = 0.9
+        
+        # Run forward pass
+        with torch.no_grad():
+            results = model(test_image)
+        
+        # Print basic results
+        print(f"Predicted number of layers: {results['structure']['num_layers'].item()}")
+        
+        if results['rendering'] is not None:
+            print("Rendering completed successfully")
+        
+        # Verify structure
+        assert 'structure' in results, "Should include structure information"
+        assert 'layer_data' in results, "Should include layer data"
+        assert 'binder_data' in results, "Should include binder information"
+        assert 'stability_data' in results, "Should include stability analysis"
+        assert 'aging_simulation' in results, "Should include aging simulation"
+        
+        # Display sample results
+        num_layers = results['structure']['num_layers'][0].item()
+        print(f"Predicting {num_layers} layers for this image")
+        
+        # Show dominant pigments in first layer
+        if num_layers > 0 and results['layer_data']['layer_pigments'].size(1) > 0:
+            pigments = results['layer_data']['layer_pigments'][0, 0]
+            ratios = results['layer_data']['layer_ratios'][0, 0]
+            
+            print("\nTop pigments in first layer:")
+            for i in range(min(3, len(pigments))):
+                if pigments[i].item() > 0:
+                    pigment_id = pigments[i].item()
+                    pigment_name = model.pigment_db.id_to_name.get(int(pigment_id), f"Pigment {pigment_id}")
+                    print(f"  - {pigment_name} (ratio: {ratios[i].item():.2f})")
+        
+        return results
+
+    # Test 2: Comprehensive analysis test
+    def test_comprehensive_analysis():
+        print("\n=== Test 2: Comprehensive Analysis ===")
+        
+        # Create a more complex test image
+        test_image = torch.zeros(1, 3, 64, 64)
+        # Red area
+        test_image[0, 0, :32, :32] = 0.9
+        # Green area
+        test_image[0, 1, :32, 32:] = 0.9
+        # Blue area
+        test_image[0, 2, 32:, :32] = 0.9
+        # Yellow area (Red + Green)
+        test_image[0, 0, 32:, 32:] = 0.9
+        test_image[0, 1, 32:, 32:] = 0.9
+        
+        # Run comprehensive analysis
+        with torch.no_grad():
+            analysis = model.analyze_image(test_image)
+        
+        # Print analysis for first image
+        if 'analysis' in analysis and len(analysis['analysis']) > 0:
+            img_analysis = analysis['analysis'][0]
+            
+            print(f"Number of layers: {img_analysis['num_layers']}")
+            print(f"Binder: {img_analysis['binder']}")
+            
+            print("\nPigment analysis:")
+            for layer in img_analysis['pigment_analysis']:
+                print(f"Layer {layer['layer']}:")
+                for pigment in layer['pigments']:
+                    print(f"  - {pigment['name']} ({pigment['color']}, ratio: {pigment['ratio']:.2f})")
+            
+            print("\nStability issues:")
+            if img_analysis['stability_issues']:
+                for issue in img_analysis['stability_issues']:
+                    print(f"  - Layer {issue['layer']}: {issue['issue']} (Severity: {issue['severity']})")
+            else:
+                print("  None detected")
+            
+            print("\nAging issues:")
+            if img_analysis['aging_issues']:
+                for issue in img_analysis['aging_issues']:
+                    print(f"  - Layer {issue['layer']}: {issue['condition']} - {issue['primary_effect']}")
+                    print(f"    Recommendation: {issue['recommendation']}")
+            else:
+                print("  None detected")
+            
+            print("\nOverall recommendations:")
+            for rec in img_analysis['overall_recommendations']:
+                print(f"  - {rec}")
+        
+        return analysis
+
+    # Test 3: Environmental effects test
+    def test_environmental_effects():
+        print("\n=== Test 3: Environmental Effects ===")
+        
+        # Create a simple test image
+        test_image = torch.zeros(1, 3, 64, 64)
+        # Add some color (uniform green)
+        test_image[0, 1, :, :] = 0.9
+        
+        # Extract features from the image
+        with torch.no_grad():
+            features = model._extract_features(test_image)
+        
+        # Test with different environmental conditions
+        env_combinations = [
+            {"name": "Ideal conditions", "humidity": 0.1, "light_exposure": 0.1},
+            {"name": "High humidity", "humidity": 0.9, "light_exposure": 0.1},
+            {"name": "High light exposure", "humidity": 0.1, "light_exposure": 0.9},
+            {"name": "Poor conditions", "humidity": 0.9, "light_exposure": 0.9}
+        ]
+        
+        for env in env_combinations:
+            print(f"\nTesting with {env['name']}:")
+            
+            # Override environmental predictions
+            with torch.no_grad():
+                # Run forward pass
+                results = model(test_image, features)
+                
+                # Override environmental conditions
+                for k, v in env.items():
+                    if k != "name" and k in results['binder_data']['env_conditions']:
+                        results['binder_data']['env_conditions'][k][0] = torch.tensor(v)
+                
+                # Regenerate stability analysis
+                stability_data = model._validate_mixture_stability(
+                    results['layer_data'],
+                    results['binder_data']['binder_names'],
+                    results['binder_data']['env_conditions']
+                )
+                
+                # Simulate aging
+                aging_simulation = model._simulate_aging(
+                    results['layer_data'],
+                    results['binder_data']['binder_names'],
+                    results['binder_data']['env_conditions'],
+                    years=100
+                )
+                
+                # Print stability and aging results for first layer
+                if (len(stability_data['stability_results']) > 0 and 
+                    len(stability_data['stability_results'][0]['layer_results']) > 0):
+                    
+                    layer_stability = stability_data['stability_results'][0]['layer_results'][0]['stability']
+                    print(f"Stability score: {layer_stability['stability_score']:.2f} ({layer_stability['stability_rating']})")
+                    
+                    if len(aging_simulation) > 0 and len(aging_simulation[0]) > 0:
+                        layer_aging = aging_simulation[0][0]['aging_simulation']
+                        print(f"Condition after aging: {layer_aging['condition_score']:.2f} ({layer_aging['condition_rating']})")
+                        print(f"Primary aging effect: {layer_aging['primary_effect']}")
+        
+        return env_combinations
+
+    # Test 4: Pigment substitution test
+    def test_pigment_substitution():
+        print("\n=== Test 4: Pigment Substitution ===")
+        
+        # Create test image with red color (cinnabar-like)
+        test_image = torch.zeros(1, 3, 64, 64)
+        test_image[0, 0, :, :] = 0.9  # High red channel
+        
+        # Run analysis
+        with torch.no_grad():
+            results = model(test_image)
+        
+        # Check if we detected unstable pigments
+        has_unstable_mixture = False
+        if 'stability_data' in results:
+            stability_results = results['stability_data']['stability_results']
+            if len(stability_results) > 0:
+                for layer_result in stability_results[0]['layer_results']:
+                    if not layer_result['stability'].get('is_stable', True):
+                        has_unstable_mixture = True
+                        
+                        print(f"Found unstable mixture in layer {layer_result['layer_idx'] + 1}")
+                        print(f"Stability score: {layer_result['stability']['stability_score']:.2f}")
+                        
+                        if 'corrections' in layer_result['stability']:
+                            corrections = layer_result['stability']['corrections']
+                            
+                            print("\nCorrection suggestions:")
+                            for suggestion in corrections['suggestions']:
+                                if suggestion['type'] == "pigment_replacement" and 'alternatives' in suggestion:
+                                    print(f"Suggested replacements for {suggestion['problematic_pigment']}:")
+                                    
+                                    for alt in suggestion['alternatives']:
+                                        print(f"  - {alt['name']} (stability: {alt['stability_score']:.2f})")
+                                        
+                                elif suggestion['type'] == "ratio_adjustment" and 'pigment' in suggestion:
+                                    print(f"Adjust ratio for {suggestion['pigment']}:")
+                                    print(f"  From {suggestion['original_ratio']:.2f} to {suggestion['new_ratio']:.2f}")
+        
+        if not has_unstable_mixture:
+            print("No unstable mixtures detected in this test")
+        
+        return results
+
+    # Test 5: Aging simulation test
+    def test_aging_simulation():
+        print("\n=== Test 5: Aging Simulation ===")
+        
+        # Create a simple test image
+        test_image = torch.zeros(1, 3, 64, 64)
+        # Add some color (blue - like azurite)
+        test_image[0, 2, :, :] = 0.9
+        
+        # Run aging analysis for different time periods
+        time_periods = [10, 50, 100, 200, 500]
+        
+        for years in time_periods:
+            with torch.no_grad():
+                # Run forward pass
+                results = model(test_image)
+                
+                # Run aging simulation
+                aging_simulation = model._simulate_aging(
+                    results['layer_data'],
+                    results['binder_data']['binder_names'],
+                    results['binder_data']['env_conditions'],
+                    years=years
+                )
+                
+                if len(aging_simulation) > 0 and len(aging_simulation[0]) > 0:
+                    layer_aging = aging_simulation[0][0]['aging_simulation']
+                    
+                    print(f"\nAfter {years} years:")
+                    print(f"Condition: {layer_aging['condition_score']:.2f} ({layer_aging['condition_rating']})")
+                    print(f"Effects: darkening={layer_aging['aging_effects']['darkening']:.2f}, " +
+                         f"yellowing={layer_aging['aging_effects']['yellowing']:.2f}, " +
+                         f"fading={layer_aging['aging_effects']['fading']:.2f}, " +
+                         f"cracking={layer_aging['aging_effects']['cracking']:.2f}")
+                    print(f"Primary effect: {layer_aging['primary_effect']}")
+                    print(f"Explanation: {layer_aging['explanation']}")
+                else:
+                    print(f"\nNo aging data for {years} years")
+        
+        return time_periods
+
+    # Test 6: Example-based rendering test
+    def test_rendering():
+        print("\n=== Test 6: Rendering Test ===")
+        
+        # Try to load an example image if possible
+        try:
+            # Create a simple image with strong colors
+            test_image = torch.zeros(1, 3, 128, 128)
+            # Red circle in the middle
+            for i in range(128):
+                for j in range(128):
+                    dist = ((i - 64) ** 2 + (j - 64) ** 2) ** 0.5
+                    if dist < 32:
+                        test_image[0, 0, i, j] = 0.9  # Red channel
+            
+            # Blue background with gradient
+            for i in range(128):
+                for j in range(128):
+                    dist = ((i - 64) ** 2 + (j - 64) ** 2) ** 0.5
+                    if dist >= 32:
+                        test_image[0, 2, i, j] = 0.5 + 0.4 * (dist - 32) / 64  # Blue channel
+            
+            # Run rendering
+            with torch.no_grad():
+                results = model(test_image)
+                
+                if results['rendering']:
+                    # Get rendered layers and composite
+                    rendered_layers = results['rendering']['rendered_layers']
+                    composite = results['rendering']['composite']
+                    refined = results['rendering']['refined']
+                    
+                    print(f"Number of rendered layers: {len(rendered_layers)}")
+                    
+                    # Create a figure to show the results
+                    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                    
+                    # Show original image
+                    axes[0].imshow(test_image[0].permute(1, 2, 0).cpu().numpy())
+                    axes[0].set_title("Original Image")
+                    axes[0].axis('off')
+                    
+                    # Show composite
+                    axes[1].imshow(composite[0].permute(1, 2, 0).cpu().numpy())
+                    axes[1].set_title("Composite Rendering")
+                    axes[1].axis('off')
+                    
+                    # Show refined result
+                    axes[2].imshow(refined[0].permute(1, 2, 0).cpu().numpy())
+                    axes[2].set_title("Refined Rendering")
+                    axes[2].axis('off')
+                    
+                    plt.tight_layout()
+                    plt.savefig("rendering_test.png")
+                    print("Saved rendering visualization to 'rendering_test.png'")
+                    plt.close()
+                    
+                    # Optional: Display individual layers
+                    if len(rendered_layers) > 0:
+                        fig, axes = plt.subplots(1, min(3, len(rendered_layers)), figsize=(15, 5))
+                        if len(rendered_layers) == 1:
+                            axes = [axes]  # Make iterable for single layer case
+                            
+                        for i, layer in enumerate(rendered_layers[:3]):  # Show first 3 layers
+                            axes[i].imshow(layer[0].permute(1, 2, 0).cpu().numpy())
+                            axes[i].set_title(f"Layer {i+1}")
+                            axes[i].axis('off')
+                            
+                        plt.tight_layout()
+                        plt.savefig("layer_visualization.png")
+                        print("Saved layer visualization to 'layer_visualization.png'")
+                        plt.close()
+                else:
+                    print("Rendering data not available")
+                    
+        except Exception as e:
+            print(f"Error in rendering test: {str(e)}")
+            
+        return None  # No need to return the potentially large rendering data
+
+    # Run the tests
+    with torch.no_grad():  # Ensure we don't compute gradients for testing
+        print_model_dimensions()
+        test1 = test_simplified()
+        test_results = test_basic_functionality()
+        analysis_results = test_comprehensive_analysis()
+        env_results = test_environmental_effects()
+        substitution_results = test_pigment_substitution()
+        aging_results = test_aging_simulation()
+        rendering_results = test_rendering()
+    
+    print("\nAll tests completed!")
