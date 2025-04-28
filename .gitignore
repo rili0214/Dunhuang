@@ -1,0 +1,18 @@
+# Ignore processed data folders
+MuralDH/
+Mural_seg_downscaled/
+Mural512_processed/
+
+# (Optional) Ignore other large files
+*.zip
+*.tar.gz
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
