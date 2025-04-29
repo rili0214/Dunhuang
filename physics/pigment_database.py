@@ -6,52 +6,20 @@ import warnings
 import os
 import json
 
-try:
-    from chemparse import parse_formula     # type: ignore # pip install chemparse if not installed
-except ImportError:
-    def parse_formula(formula):
-        """Chemical formula parser that handles hydrates, mixtures, and complex structures"""
-        result = {}
-        components = formula.split("+")
+def _parse_simple_formula(formula):
+    """Parse a simple chemical formula without parentheses"""
+    elements = {}
+    pattern = r'([A-Z][a-z]*)(\d*)'
+    matches = re.findall(pattern, formula)
         
-        for component in components:
-            component = component.strip()
-            if component.lower() in ('various', 'mixed', 'clay', 'amorphous'):
-                continue
-
-            # Handle hydrates
-            if "·" in component:
-                parts = component.split("·")
-                base_formula = parts[0].strip()
-                hydrate = parts[1].strip()
-                
-                # Parse base compound
-                base_elements = _parse_single_compound(base_formula)
-                for element, count in base_elements.items():
-                    result[element] = result.get(element, 0) + count
-                
-                # Parse hydrate
-                if hydrate.endswith("H2O"):
-                    water_count = 1
-                    if len(hydrate) > 3:
-                        try:
-                            water_count = int(hydrate[0:-3])
-                        except ValueError:
-                            water_count = 1
-                    result['H'] = result.get('H', 0) + 2 * water_count
-                    result['O'] = result.get('O', 0) + water_count
-            else:
-                # Regular compound
-                elements = _parse_single_compound(component)
-                for element, count in elements.items():
-                    result[element] = result.get(element, 0) + count
-                    
-        return result
+    for element, count in matches:
+        elements[element] = elements.get(element, 0) + (int(count) if count else 1)
+        
+    return elements
 
 def _parse_single_compound(compound):
     """Parse a single chemical compound formula"""
     elements = {}
-
     if '(' in compound and ')' in compound:
         pattern = r'\(([^)]+)\)(\d*)'
         for group, multiplier in re.findall(pattern, compound):
@@ -62,23 +30,55 @@ def _parse_single_compound(compound):
                 elements[element] = elements.get(element, 0) + count * mult
 
         compound = re.sub(pattern, '', compound)
-
+            
     simple_elements = _parse_simple_formula(compound)
     for element, count in simple_elements.items():
         elements[element] = elements.get(element, 0) + count
-        
+            
     return elements
 
-def _parse_simple_formula(formula):
-    """Parse a simple chemical formula without parentheses"""
-    elements = {}
-    pattern = r'([A-Z][a-z]*)(\d*)'
-    matches = re.findall(pattern, formula)
-    
-    for element, count in matches:
-        elements[element] = elements.get(element, 0) + (int(count) if count else 1)
-    
-    return elements
+def parse_formula(formula):
+    """Enhanced chemical formula parser that handles hydrates, mixtures, and complex structures"""
+    result = {}
+    components = formula.split("+")
+        
+    for component in components:
+        component = component.strip()
+        if component.lower() in ('various', 'mixed', 'clay', 'amorphous'):
+            continue
+        if "·" in component or "." in component:
+            if "·" in component:
+                parts = component.split("·")
+            else:
+                parts = component.split(".")
+                    
+            base_formula = parts[0].strip()
+            hydrate = parts[1].strip()
+
+            base_elements = _parse_single_compound(base_formula)
+            for element, count in base_elements.items():
+                result[element] = result.get(element, 0) + count
+
+            if hydrate.endswith("H2O"):
+                water_count = 1
+                if len(hydrate) > 3:
+                    try:
+                        water_count = int(hydrate[0:-3])
+                    except ValueError:
+                        water_count = 1
+
+                result['H'] = result.get('H', 0) + 2 * water_count
+                result['O'] = result.get('O', 0) + water_count
+            else:
+                hydrate_elements = _parse_single_compound(hydrate)
+                for element, count in hydrate_elements.items():
+                    result[element] = result.get(element, 0) + count
+        else:
+            elements = _parse_single_compound(component)
+            for element, count in elements.items():
+                result[element] = result.get(element, 0) + count
+                    
+    return result
 
 
 # ===== Dunhuang Pigment Database =====
