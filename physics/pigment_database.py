@@ -38,7 +38,7 @@ def _parse_single_compound(compound):
     return elements
 
 def parse_formula(formula):
-    """Enhanced chemical formula parser that handles hydrates, mixtures, and complex structures"""
+    """Chemical formula parser that handles hydrates, mixtures, and complex structures"""
     result = {}
     components = formula.split("+")
         
