@@ -175,15 +175,12 @@ class DunhuangPigmentDB:
         
         for pigment in basic_pigments:
             enhanced_pigment = pigment.copy()
-            
-            # Add full spectral reflectance data (converted from RGB)
             rgb = pigment["reflectance"]
             enhanced_pigment["spectral_reflectance"] = {
                 "wavelengths": list(self.wavelengths),
                 "values": self._rgb_to_spectral(rgb)
             }
-            
-            # Add refractive index based on pigment type
+
             if "Cu" in self._parse_chemical_formula(pigment["formula"]):
                 enhanced_pigment["refractive_index"] = 1.7  # Copper-based pigments
             elif "Pb" in self._parse_chemical_formula(pigment["formula"]):
@@ -194,26 +191,21 @@ class DunhuangPigmentDB:
                 enhanced_pigment["refractive_index"] = 1.5  # Organic pigments
             else:
                 enhanced_pigment["refractive_index"] = 1.6  # Default value
-            
-            # Add aging properties
+
             basic_aging = pigment["aging"]
             enhanced_pigment["aging"] = {
                 "yellowing": {"rate": basic_aging["yellowing"] / 20, "max": basic_aging["yellowing"]},
                 "darkening": {"rate": basic_aging["darkening"] / 20, "max": basic_aging["darkening"]},
                 "fading": {"rate": basic_aging["fading"] / 20, "max": basic_aging["fading"]}
             }
-            
-            # Add microstructure properties 
+
             enhanced_pigment["microstructure"] = {
                 "porosity": 0.2 + 0.3 * pigment["roughness"],  # Correlate with roughness
                 "specific_surface_area": 5.0 + 15.0 * (1.0 / pigment["particle_size"]["mean"]),  # m²/g, inverse with size
                 "shape_factor": 0.7 if pigment["color"] in ["red", "yellow"] else 0.5  # More spherical for some colors
             }
-            
-            # Add chemical stability information
+
             enhanced_pigment["chemical_stability"] = self._get_chemical_stability(pigment)
-            
-            # Add spectral absorption and scattering coefficients for more accurate Kubelka-Munk
             enhanced_pigment["spectral_properties"] = self._calculate_spectral_properties(enhanced_pigment)
             
             enhanced_pigments.append(enhanced_pigment)
@@ -444,7 +436,7 @@ class DunhuangPigmentDB:
     
     def _rgb_to_spectral(self, rgb):
         """
-        Convert RGB values to full spectral reflectance values with improved accuracy
+        Convert RGB values to full spectral reflectance values with improved accuracy.
         
         Args:
             rgb: RGB reflectance values [r, g, b]
@@ -460,8 +452,7 @@ class DunhuangPigmentDB:
         r, g, b = rgb
         spectral = np.zeros(self.spectral_resolution)
         wavelengths = self.wavelengths
-        
-        # Red contribution (shifted toward long wavelengths)
+
         red_idx = (wavelengths >= 580)
         red_curve = np.zeros_like(spectral)
         if np.any(red_idx):
@@ -469,16 +460,12 @@ class DunhuangPigmentDB:
             peak = 650
             left_width = 50
             right_width = 70
-            
-            # Different widths for left and right sides of peak
             left_mask = x < peak
             widths = np.zeros_like(x)
             widths[left_mask] = left_width
             widths[~left_mask] = right_width
-            
             red_curve[red_idx] = r * np.exp(-((x - peak)**2) / (2 * widths**2))
         
-        # Green contribution (middle wavelengths)
         green_idx = (wavelengths >= 480) & (wavelengths <= 600)
         green_curve = np.zeros_like(spectral)
         if np.any(green_idx):
@@ -486,8 +473,7 @@ class DunhuangPigmentDB:
             peak = 530
             width = 40
             green_curve[green_idx] = g * np.exp(-((x - peak)**2) / (2 * width**2))
-            
-        # Blue contribution (shifted toward short wavelengths)
+
         blue_idx = (wavelengths <= 520)
         blue_curve = np.zeros_like(spectral)
         if np.any(blue_idx):
@@ -495,24 +481,19 @@ class DunhuangPigmentDB:
             peak = 450
             left_width = 70
             right_width = 40
-            
-            # Different widths for left and right sides of peak
+
             left_mask = x < peak
             widths = np.zeros_like(x)
             widths[left_mask] = left_width
             widths[~left_mask] = right_width
-            
             blue_curve[blue_idx] = b * np.exp(-((x - peak)**2) / (2 * widths**2))
 
         spectral = red_curve + green_curve + blue_curve
-
         gray_level = min(r, g, b)
-        
-        # Add gray level to all wavelengths
+
         if gray_level > 0.1:  
             spectral += gray_level * 0.8 
-            
-        # Add yellow peak when red and green are both high
+
         if r > 0.5 and g > 0.5 and b < 0.5:
             yellow_idx = (wavelengths >= 560) & (wavelengths <= 590)
             if np.any(yellow_idx):
@@ -521,8 +502,7 @@ class DunhuangPigmentDB:
                 width = 15
                 yellow_factor = min(r, g) * 0.5
                 spectral[yellow_idx] += yellow_factor * np.exp(-((x - peak)**2) / (2 * width**2))
-        
-        # Add brown peak when red is high and green and blue are low
+
         if r > 0.3 and g < 0.5 and b < 0.3 and r > g > b:
             brown_idx = (wavelengths >= 600)
             if np.any(brown_idx):
@@ -763,7 +743,7 @@ class DunhuangPigmentDB:
     
     def get_absorption_and_scattering(self, pigment_id):
         """
-        Get absorption and scattering coefficients for Kubelka-Munk calculations
+        Get absorption and scattering coefficients for Kubelka-Munk calculations.
         
         Args:
             pigment_id: Pigment identifier
@@ -792,7 +772,7 @@ class DunhuangPigmentDB:
     
     def get_refractive_index(self, pigment_id):
         """
-        Get refractive index data for a pigment
+        Get refractive index data for a pigment.
         
         Args:
             pigment_id: Pigment identifier
@@ -812,7 +792,7 @@ class DunhuangPigmentDB:
     
     def calculate_aged_reflectance(self, pigment_id, years, environmental_conditions=None):
         """
-        Calculate aged spectral reflectance based on time-dependent aging model
+        Calculate aged spectral reflectance based on time-dependent aging model.
         
         Args:
             pigment_id: Pigment identifier
@@ -856,17 +836,14 @@ class DunhuangPigmentDB:
 
         env_factor = 1.0
         if environmental_conditions:
-            # Humidity increases yellowing and darkening
             if "humidity" in environmental_conditions:
                 humidity = environmental_conditions["humidity"]
                 env_factor *= 1.0 + humidity * 0.5
-            
-            # Light exposure increases fading
+
             if "light_exposure" in environmental_conditions:
                 light = environmental_conditions["light_exposure"]
                 env_factor *= 1.0 + light * 0.8
-            
-            # Pollutants increase all degradation
+
             if "pollutants" in environmental_conditions:
                 pollutants = environmental_conditions["pollutants"]
                 env_factor *= 1.0 + pollutants * 0.7
@@ -877,26 +854,20 @@ class DunhuangPigmentDB:
         darkening = darkening_max * (1 - np.exp(-darkening_rate * years * env_factor))
         fading = fading_max * (1 - np.exp(-fading_rate * years * env_factor))
         
-        # Create wavelength-dependent aging effects
         yellowing_effect = np.ones_like(original_spectral)
         blue_region = self.wavelengths < 480
         if np.any(blue_region):
             yellowing_effect[blue_region] -= yellowing * (1.5 - self.wavelengths[blue_region] / 480)
-        
-        # Darkening affects all wavelengths
+
         darkening_effect = np.ones_like(original_spectral) * (1.0 - darkening)
-        
-        # Fading affects absorption bands more than reflection bands
         fading_effect = np.ones_like(original_spectral)
         for i, refl in enumerate(original_spectral):
-            if refl < 0.5:  # Absorption band
+            if refl < 0.5:      # Absorption band
                 fading_effect[i] = 1.0 + fading * (0.5 - refl) * 2.0
-            else:  # Reflection band
+            else:               # Reflection band
                 fading_effect[i] = 1.0
         
-        # Apply all effects to spectrum
         aged_spectral = original_spectral * yellowing_effect * darkening_effect * fading_effect
-        
         aged_spectral = np.clip(aged_spectral, 0.0, 1.0)
         if self.use_cache:
             self._cache[cache_key] = aged_spectral.tolist()
@@ -905,7 +876,7 @@ class DunhuangPigmentDB:
     
     def suggest_compatible_pigments(self, pigment_id):
         """
-        Suggest pigments that are historically and chemically compatible
+        Suggest pigments that are historically and chemically compatible.
         
         Args:
             pigment_id: Base pigment to find compatible options for
@@ -930,8 +901,7 @@ class DunhuangPigmentDB:
         for i, candidate in enumerate(self.pigments):
             if i == pigment_id:
                 continue  
-                
-            # Calculate chemical compatibility
+
             candidate_chem = self._parse_chemical_formula(candidate["formula"])
             candidate_class = candidate.get("chemical_stability", {}).get("compatibility_class", "standard")
             score = 1.0
@@ -948,8 +918,7 @@ class DunhuangPigmentDB:
                 if (base_class == class1 and candidate_class == class2) or \
                    (base_class == class2 and candidate_class == class1):
                     score *= penalty
-            
-            # Penalize problematic chemical combinations
+
             problematic_combinations = [
                 ({"Pb"}, {"S"}, 0.3),  # Lead + Sulfur
                 ({"Cu"}, {"S"}, 0.4),  # Copper + Sulfur
@@ -997,7 +966,7 @@ class DunhuangPigmentDB:
         Returns:
             Tensor of spectral reflectance data
         """
-        wavelengths, reflectance = self.get_spectral_reflectance(pigment_id)
+        _, reflectance = self.get_spectral_reflectance(pigment_id)
         return torch.tensor(reflectance, dtype=torch.float32)
     
     def export_to_json(self, file_path):
