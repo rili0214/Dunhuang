@@ -23,8 +23,8 @@ import torch
 import torch.nn as nn
 from typing import Dict, Optional, Tuple, List
 
-from encoder import SwinEncoderExtractor
-from decoder import DecoderModule
+from models.encoder.encoder import SwinEncoderExtractor
+from models.efficient_models.decoder import DecoderModule
 
 
 class MuralRestorationModel(nn.Module):

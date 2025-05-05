@@ -20,6 +20,15 @@ Usage:
                     --batch_size 8 
                     --epochs 200 
                     --lr 0.0001
+
+    python -m models.efficient_models.train \
+        --data_path /Users/yushen/Desktop/test_murals \
+        --batch_size 2 \
+        --epochs 2 \
+        --lr 1e-4 \
+        --num_workers 0 \
+        --output_dir ./debug_output
+
 """
 
 import os
@@ -36,11 +45,11 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 from torchvision.utils import save_image
-
+from PIL import Image
 # Import the updated model components
-from encoder import SwinEncoderExtractor
-from decoder import DecoderModule
-from model import MuralRestorationModel
+from models.encoder.encoder import SwinEncoderExtractor
+from models.efficient_models.decoder import DecoderModule
+from models.efficient_models.model import MuralRestorationModel
 
 
 class MuralDataset(Dataset):
@@ -151,8 +160,9 @@ class MuralDataset(Dataset):
             Dict[str, torch.Tensor]: Dictionary with 'damaged' and 'gt' tensors
         """
         # Load images
-        damaged_image = transforms.Image.open(self.damaged_paths[idx]).convert('RGB')
-        gt_image = transforms.Image.open(self.gt_paths[idx]).convert('RGB')
+        damaged_image = Image.open(self.damaged_paths[idx]).convert('RGB')
+        gt_image = Image.open(self.gt_paths[idx]).convert('RGB')
+
         
         # Apply transformations
         seed = np.random.randint(2147483647)  # Use same seed for both images
@@ -226,7 +236,8 @@ class PerceptualLoss(nn.Module):
                 module.register_forward_hook(self._get_features_hook(name))
         
         # Move to GPU if available
-        self.vgg = vgg.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        #self.vgg = vgg.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        self.vgg = vgg.to(DEVICE)
         self.criterion = nn.L1Loss()
     
     def _get_features_hook(self, name: str):
@@ -335,9 +346,10 @@ class MuralLoss(nn.Module):
             [0, 0, 0],
             [1, 2, 1]
         ]).float().view(1, 1, 3, 3).repeat(3, 1, 1, 1)
-        
+        device = DEVICE
         # Move to GPU if available
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         self.sobel_x = self.sobel_x.to(device)
         self.sobel_y = self.sobel_y.to(device)
     
@@ -484,8 +496,9 @@ class MuralTrainer:
             model (Optional[MuralRestorationModel]): Pre-initialized model (if None, creates new)
         """
         self.args = args
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = DEVICE
+
         # Create output directory
         os.makedirs(args.output_dir, exist_ok=True)
         os.makedirs(os.path.join(args.output_dir, 'checkpoints'), exist_ok=True)
@@ -501,7 +514,6 @@ class MuralTrainer:
             )
         else:
             self.model = model
-        
         self.model = self.model.to(self.device)
         
         # Initialize loss function
@@ -580,16 +592,19 @@ class MuralTrainer:
             batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=self.args.num_workers,
-            pin_memory=True,
+            #pin_memory=True,
+            pin_memory=(self.device.type == 'cuda'),
             drop_last=True
         )
+
         
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.args.batch_size,
             shuffle=False,
             num_workers=self.args.num_workers,
-            pin_memory=True
+            #pin_memory=True
+            pin_memory=(self.device.type == 'cuda')
         )
         
         return train_loader, val_loader
@@ -985,4 +1000,17 @@ def main():
 
 
 if __name__ == "__main__":
+    # ------------------------------------------------------------------------------
+    # Device configuration for Apple Silicon (M3 Pro) MPS backend
+    # ------------------------------------------------------------------------------
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        DEVICE = torch.device("mps")
+        print("==> Using Apple MPS (Metal) backend")
+    elif torch.cuda.is_available():
+        DEVICE = torch.device("cuda")
+        print("==> Using CUDA backend")
+    else:
+        DEVICE = torch.device("cpu")
+        print("==> Using CPU")
+    # ------------------------------------------------------------------------------
     main()
