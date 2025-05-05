@@ -51,13 +51,19 @@ git clone https://github.com/advimman/lama.git
 
 ### 4. Preprocess `Mural512` Dataset (Split, Mask, and Downscale)
 
-#### Masking Strategy
+### **Masking Strategy**
 
-- Irregular masks: Simulate weathering, cracks, or flaking (e.g., free-form brush or blobs).
-- Box/rectangle masks: Simulate localized damage or occlusion.
-- Combined strategy: Random choice between irregular and rectangular for diversity. --> What we used here
+We currently use the Dunhuang-style mask strategy and not LaMa (deprecated due to flakiness/bugs).
 
-**Dunhuang-style Mask**:
+#### Strategy Details
+
+- **Irregular masks 🌀**: Simulate weathering, cracks, or flaking (like free-form strokes or blobs).
+- **Box/rectangle masks 🟦**: Simulate localized damage or occlusion.
+- **Combined strategy 🎲**: Random choice between irregular and rectangular —> what we used here :)
+
+---
+
+### ✅ **Dunhuang-style Mask (Current)**
 
 ```bash
 # From ./Dunhuang/preprocessing, run:
@@ -68,10 +74,13 @@ python preprocess_Mural512.py \
   --use_dh_mask
 ```
 
-**Lama Mask (flaky/buggy)**:
+---
+
+### ⚠️ **LaMa Mask (Deprecated / Buggy)**
 
 ```bash
-pip install -r ../../../lama/requirements.txt;
+pip install -r ../../../lama/requirements.txt
+
 # From ./Dunhuang/preprocessing, run:
 python preprocess_Mural512.py \
   --source_dir ../MuralDH/Mural512 \
