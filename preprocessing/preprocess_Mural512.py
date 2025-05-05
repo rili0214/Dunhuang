@@ -5,6 +5,10 @@ import subprocess
 from PIL import Image
 from resize_utils import resize_folder
 
+import sys
+sys.path.append(os.path.dirname(__file__))
+from generate_dh_masks import main as generate_dh_masks
+
 SEED = 42
 
 def split_dataset(source_dir, output_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
@@ -61,8 +65,19 @@ def generate_masks_with_lama(images_dir, masks_dir, mask_config, lama_repo_dir):
     shutil.rmtree(masks_temp_dir)
     print(f"Masks generated for {images_dir}")
 
+def generate_masks_with_dh_script(images_dir, masks_dir):
+    os.makedirs(masks_dir, exist_ok=True)
+    generate_dh_masks(
+        input_dir=images_dir,
+        output_dir=masks_dir,
+        ext=".png",              
+        mask_type="mixed",        # or "irregular", "box"
+        preserve_names=True
+    )
+    print(f"Masks generated for {images_dir} using Dunhuang-style masking.")
 
-def preprocess_pipeline(source_dir, output_dir, mask_config, lama_repo_dir, resize_to=(256, 256)):
+
+def preprocess_pipeline(source_dir, output_dir, mask_config, lama_repo_dir, resize_to=(256, 256), use_dh_mask=True):
     # Step 1: Split dataset
     split_dataset(source_dir, output_dir)
 
@@ -71,10 +86,13 @@ def preprocess_pipeline(source_dir, output_dir, mask_config, lama_repo_dir, resi
         images_dir = os.path.join(output_dir, split, 'images')
         masks_dir = os.path.join(output_dir, split, 'masks')
 
-        # 2.1 Generate LaMa masks
-        generate_masks_with_lama(images_dir, masks_dir, mask_config, lama_repo_dir)
+        # Dunhuang mask or Lama mask
+        if use_dh_mask:
+            generate_masks_with_dh_script(images_dir, masks_dir)
+        else:
+            generate_masks_with_lama(images_dir, masks_dir, mask_config, lama_repo_dir)
 
-        # 2.2 Resize images and masks
+        # Resize both images and masks
         resize_folder(images_dir, images_dir, size=resize_to, is_label=False)
         resize_folder(masks_dir, masks_dir, size=resize_to, is_label=True)
 
@@ -86,8 +104,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Full preprocessing pipeline for Mural512 dataset.")
     parser.add_argument('--source_dir', type=str, required=True, help="Original Mural512 directory")
     parser.add_argument('--output_dir', type=str, required=True, help="Processed output directory")
-    parser.add_argument('--mask_config', type=str, required=True, help="Path to LaMa mask generator config")
-    parser.add_argument('--lama_repo_dir', type=str, required=True, help="Path to LaMa repo")
+    parser.add_argument('--mask_config', type=str, default='', help="Path to LaMa mask generator config (ignored if --use_dh_mask)")
+    parser.add_argument('--lama_repo_dir', type=str, default='', help="Path to LaMa repo (ignored if --use_dh_mask)")
+    parser.add_argument('--resize_to', type=int, nargs=2, required=True, help="Resize resolution as two integers, e.g., 256 256")
+    parser.add_argument('--use_dh_mask', action='store_true', help="Use Dunhuang-style mask generator instead of LaMa")
 
     args = parser.parse_args()
 
@@ -95,5 +115,8 @@ if __name__ == "__main__":
         source_dir=args.source_dir,
         output_dir=args.output_dir,
         mask_config=args.mask_config,
-        lama_repo_dir=args.lama_repo_dir
+        lama_repo_dir=args.lama_repo_dir,
+        resize_to=tuple(args.resize_to),
+        use_dh_mask=args.use_dh_mask
     )
+
