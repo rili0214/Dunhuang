@@ -1,0 +1,92 @@
+{
+  "output_dir": "physics_refinement_results",
+  "use_gpu": true,
+  "image": {
+    "path": "/mnt/c/Users/taox0/OneDrive/Documents/GitHub/DunHuang/models/dunhuang/segmentation/train/images/003480.png",
+    "size": [256, 256],
+    "batch_processing": false,
+    "folder": null
+  },
+  "pigment_analysis": {
+    "min_clusters": 8,
+    "max_clusters": 20,
+    "use_dbscan": true,
+    "n_suggestions": 5
+  },
+  "stability_validation": {
+    "binder_type": "animal_glue",
+    "environmental_conditions": {
+      "humidity": 0.5,
+      "light_exposure": 0.5,
+      "air_pollutants": 0.3,
+      "temperature_fluctuation": 0.3,
+      "temperature": 298
+    }
+  },
+  "aging_simulation": {
+    "years": 100,
+    "environmental_conditions": {
+      "humidity": 0.6,
+      "light_exposure": 0.8,
+      "air_pollutants": 0.4,
+      "temperature_fluctuation": 0.5
+    }
+  },
+  "optical_properties": {
+    "viewing_angle": 0.4,
+    "light_direction": [0.0, 0.0, 1.0],
+    "particle_data": {
+      "mean_size": 5.0,
+      "std": 1.0
+    },
+    "fluorescence": true,
+    "microstructure": {
+      "porosity": 0.3,
+      "rms_height": 0.8,
+      "correlation_length": 5.0
+    }
+  },
+  "layered_structure": {
+    "layers": [
+      {
+        "pigments": null,
+        "binder": "animal_glue",
+        "thickness": 20.0
+      },
+      {
+        "pigments": null,
+        "binder": "animal_glue",
+        "thickness": 20.0
+      }
+    ]
+  },
+  "historical_accuracy": {
+    "period": "middle_tang",
+    "region": "dunhuang"
+  },
+  "monte_carlo": {
+    "n_samples": 50,
+    "parameter_bounds": {
+      "humidity": [0.3, 0.7],
+      "light_exposure": [0.2, 0.8],
+      "air_pollutants": [0.1, 0.5],
+      "temperature": [288, 308]
+    }
+  },
+  "visualization": {
+    "show_plots": false,
+    "save_images": true,
+    "dpi": 150,
+    "figsize": [18, 12],
+    "generate_report": true
+  },
+  "tests_to_run": [
+    "pigment_analysis",
+    "stability",
+    "aging",
+    "optical",
+    "layered",
+    "historical",
+    "rendering"
+  ]
+}
