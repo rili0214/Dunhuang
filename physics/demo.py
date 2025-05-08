@@ -56,7 +56,7 @@ def load_config(config_path, override_args=None):
         "output_dir": "physics_refinement_results",
         "use_gpu": True,
         "image": {
-            "path": "/mnt/c/Users/taox0/OneDrive/Documents/GitHub/DunHuang/models/dunhuang/segmentation/train/images/001391.png",
+            "path": "path to the image...",
             "size": [256, 256],
             "batch_processing": False,
             "folder": None
