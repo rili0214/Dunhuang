@@ -5,7 +5,7 @@ Update on 05/02/25:
 Update on 04/28/25:
 
 - For data preprocessing and masking, etc., please see the data_preprocess branch, which Yumian Cui contributed. (5/4 + 5/5: Update: please see the preprocessing folder for preprocessing pipeline and the shared google drive for the processed data `Mural512_processed.zip`)
-- The current Physics Refinement Module has weird bugs that need to be addressed. Yuming Xie is working on it and will update it ASAP.
+- The current Physics Refinement Module is all set to use!
 
 Here is the wrokflow of DunHuang Mural Restoration process:
 ![alt text](https://github.com/rili0214/Dunhuang/blob/main/Images/efficient_workflow.png)
