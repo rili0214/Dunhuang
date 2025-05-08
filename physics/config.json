@@ -2,7 +2,7 @@
   "output_dir": "physics_refinement_results",
   "use_gpu": true,
   "image": {
-    "path": "/mnt/c/Users/taox0/OneDrive/Documents/GitHub/DunHuang/models/dunhuang/segmentation/train/images/003480.png",
+    "path": " path to the image...",
     "size": [256, 256],
     "batch_processing": false,
     "folder": null
