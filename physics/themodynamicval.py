@@ -4,8 +4,6 @@ Thermodynamic Validator for Dunhuang mural pigments.
 This module provides a validator for pigment mixture stability based on chemical 
 thermodynamics, reaction kinetics, spectral validation, non-linear aging models, 
 quantum efficiency, and nanoscale physics for Dunhuang mural pigments.
-
-@Author: Yuming Xie
 """
 import torch
 import numpy as np
