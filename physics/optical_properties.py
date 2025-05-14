@@ -3,8 +3,6 @@ Optical properties module for Dunhuang mural pigments.
 
 This module provides physically accurate optical properties for Dunhuang mural pigments.
 It includes absorption, scattering, reflectance, and surface properties predictions.
-
-@Author: Yuming Xie
 """
 import torch
 import torch.nn as nn
