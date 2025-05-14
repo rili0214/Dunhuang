@@ -10,8 +10,6 @@ Usage:
     python demo.py --config config.json --image path/to/image.png
     python demo.py --list-tests                 # Show available test presets
     python demo.py --run-test stability         # Run a specific test preset
-
-@Author: Yuming Xie
 """
 import os
 import json
