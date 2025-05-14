@@ -11,4 +11,5 @@ Update on 04/28/25:
 - The current Physics Refinement Module is all set to use!
 
 Here is the wrokflow of DunHuang Mural Restoration process:
+![alt text](https://github.com/rili0214/Dunhuang/blob/main/Images/Workflow.png)
 ![alt text](https://github.com/rili0214/Dunhuang/blob/main/Images/efficient_workflow.png)
