@@ -9,8 +9,6 @@ of historically accurate pigments, including:
 2. Validating the chemical stability of pigment mixtures
 3. Simulating aging and environmental effects
 4. Generating physically accurate rendering properties
-
-@Author: Yuming Xie
 """
 import torch
 import numpy as np
