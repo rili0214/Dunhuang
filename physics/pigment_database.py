@@ -1,8 +1,6 @@
 """
 Pigment database module for Dunhuang murals, with physically accurate spectral properties.
 This code serves as the foundation for the Physics Refinement Module.
-
-@Author: Yuming Xie
 """
 import torch
 import numpy as np
