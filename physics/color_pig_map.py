@@ -3,8 +3,6 @@ Color to Pigment Mapper
 
 This module maps image colors to historically accurate pigment distributions. It uses a 
 combination of color clustering and NNs to identify pigments in images.
-
-@Author: Yuming Xie
 """
 import torch
 import torch.nn as nn
