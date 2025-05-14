@@ -16,18 +16,25 @@ Training flow:
 4. Save best models based on validation metrics
 
 Usage:
-    python train.py --data_path /path/to/murals 
-                    --batch_size 8 
-                    --epochs 200 
-                    --lr 0.0001
 
     python -m models.efficient_models.train \
-        --data_path /Users/yushen/Desktop/test_murals \
-        --batch_size 2 \
-        --epochs 2 \
-        --lr 1e-4 \
-        --num_workers 0 \
-        --output_dir ./debug_output
+    --data_path /Users/yushen/Desktop/Mural512 \
+    --batch_size 8 \
+    --epochs 50 \
+    --lr 1e-3 \
+    --num_workers 0 \
+    --output_dir ./output \
+    --patience 5
+
+python -m models.efficient_models.train \
+    --data_path /Users/yushen/Desktop/Mural512 \
+    --batch_size 8 \
+    --best_weights ./phase2-3/checkpoints/best_model.pth \
+    --output_dir ./test_results \
+    --test_only
+
+tensorboard --logdir ./phase1/logs --port 6006
+
 
 """
 
@@ -50,6 +57,7 @@ from PIL import Image
 from models.encoder.encoder import SwinEncoderExtractor
 from models.efficient_models.decoder import DecoderModule
 from models.efficient_models.model import MuralRestorationModel
+from torch.utils.tensorboard import SummaryWriter
 
 
 class MuralDataset(Dataset):
@@ -106,14 +114,15 @@ class MuralDataset(Dataset):
         ])
         
         # Verify matching pairs
-        assert len(self.damaged_paths) == len(self.gt_paths), \
-            f"Mismatched number of images: {len(self.damaged_paths)} damaged, {len(self.gt_paths)} ground truth"
+        if self.mode != 'test':
+            assert len(self.damaged_paths) == len(self.gt_paths), \
+                f"Mismatched number of images: {len(self.damaged_paths)} damaged, {len(self.gt_paths)} ground truth"
         
         # Set up transformations
         self.transform = self._get_transforms(mode, image_size, use_augmentation)
         
         print(f"Loaded {len(self.damaged_paths)} {mode} image pairs")
-    
+
     def _get_transforms(self, mode: str, image_size: int, use_augmentation: bool) -> transforms.Compose:
         """
         Get image transformations based on dataset mode.
@@ -495,6 +504,7 @@ class MuralTrainer:
             args (argparse.Namespace): Training arguments
             model (Optional[MuralRestorationModel]): Pre-initialized model (if None, creates new)
         """
+        
         self.args = args
         #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.device = DEVICE
@@ -515,7 +525,10 @@ class MuralTrainer:
         else:
             self.model = model
         self.model = self.model.to(self.device)
-        
+
+        log_dir = os.path.join(args.output_dir, 'logs')
+        self.writer = SummaryWriter(log_dir)
+
         # Initialize loss function
         self.criterion = MuralLoss(
             l1_weight=args.l1_weight,
@@ -539,8 +552,8 @@ class MuralTrainer:
         )
         
         # Initialize data loaders
-        self.train_loader, self.val_loader = self._init_data_loaders()
-        
+        self.train_loader, self.val_loader, self.test_loader = self._init_data_loaders()
+
         # Initialize training state
         self.current_epoch = 0
         self.best_val_loss = float('inf')
@@ -585,6 +598,13 @@ class MuralTrainer:
             image_size=self.args.image_size,
             use_augmentation=False
         )
+
+        test_dataset = MuralDataset(
+            data_path=self.args.data_path,
+            mode='test',
+            image_size=self.args.image_size,
+            use_augmentation=False
+        )
         
         # Create data loaders
         train_loader = DataLoader(
@@ -592,22 +612,27 @@ class MuralTrainer:
             batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=self.args.num_workers,
-            #pin_memory=True,
             pin_memory=(self.device.type == 'cuda'),
             drop_last=True
         )
 
-        
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.args.batch_size,
             shuffle=False,
             num_workers=self.args.num_workers,
-            #pin_memory=True
             pin_memory=(self.device.type == 'cuda')
         )
         
-        return train_loader, val_loader
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            num_workers=self.args.num_workers,
+            pin_memory=(self.device.type == 'cuda')
+        )
+
+        return train_loader, val_loader, test_loader
     
     def _save_checkpoint(self, epoch: int, is_best: bool = False) -> None:
         """
@@ -652,7 +677,11 @@ class MuralTrainer:
             checkpoint_path (str): Path to the checkpoint file
         """
         print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=self.device,
+            weights_only=False
+        )
         
         # Load model and training state
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -819,6 +848,10 @@ class MuralTrainer:
               f"PSNR: {epoch_metrics['psnr']:.2f} dB, "
               f"Time: {elapsed:.2f}s")
         
+        self.writer.add_scalar('train/loss', epoch_metrics['loss'], epoch+1)
+        self.writer.add_scalar('train/psnr', epoch_metrics['psnr'], epoch+1)
+        self.writer.flush()
+
         return epoch_metrics
     
     def validate(self, epoch: int) -> Dict[str, float]:
@@ -888,6 +921,10 @@ class MuralTrainer:
         # Save checkpoint
         self._save_checkpoint(epoch, is_best=is_best)
         
+        self.writer.add_scalar('val/loss', val_metrics['loss'], epoch+1)
+        self.writer.add_scalar('val/psnr', val_metrics['psnr'], epoch+1)
+        self.writer.flush()
+
         return val_metrics
     
     def train(self) -> Dict[str, List[float]]:
@@ -905,6 +942,10 @@ class MuralTrainer:
             'val_psnr': []
         }
         
+        # Track best validation performance and patience
+        best_val_psnr = self.best_val_psnr
+        no_improvement_count = 0  # Tracks the number of epochs with no improvement
+
         # Train for specified number of epochs
         for epoch in range(self.current_epoch, self.args.epochs):
             # Train for one epoch
@@ -919,18 +960,73 @@ class MuralTrainer:
             
             # Update learning rate
             self.scheduler.step()
-            
-            # Check for early stopping
-            if self.args.patience > 0:
-                if len(history['val_psnr']) > self.args.patience:
-                    if all(history['val_psnr'][-i-1] >= history['val_psnr'][-i] 
-                           for i in range(1, self.args.patience + 1)):
-                        print(f"Early stopping at epoch {epoch+1}")
-                        break
-        
-        print(f"Training completed with best PSNR: {self.best_val_psnr:.2f} dB")
-        return history
 
+            # Early Stopping: Check if validation PSNR improved
+            if val_metrics['psnr'] > best_val_psnr:
+                best_val_psnr = val_metrics['psnr']
+                no_improvement_count = 0  # Reset if we have improvement
+            else:
+                no_improvement_count += 1
+
+            # Early stopping logic
+            if no_improvement_count >= self.args.patience:
+                print(f"Early stopping at epoch {epoch + 1}. Validation PSNR did not improve for {self.args.patience} epochs.")
+                break
+
+        print(f"Training completed with best PSNR: {best_val_psnr:.2f} dB")
+        self.writer.close()
+        return history
+    
+    def test_and_save_samples(self, num_samples: int = 100):
+        """
+        Run the model on the test set, save up to `num_samples` restored images,
+        and print average PSNR and SSIM.
+        """
+        self.model.eval()
+        saved = 0
+        psnr_sum = 0.0
+        ssim_sum = 0.0
+        total = 0
+
+        out_dir = os.path.join(self.args.output_dir, 'test_samples')
+        os.makedirs(out_dir, exist_ok=True)
+
+        for batch in tqdm(self.test_loader, desc="Testing"):
+            damaged = batch['damaged'].to(self.device)
+            gt      = batch['gt'].to(self.device)
+            pred    = self.model(damaged)
+
+            for i in range(damaged.size(0)):
+                # Compute PSNR
+                single_psnr = self._compute_psnr(
+                    pred[i].unsqueeze(0), gt[i].unsqueeze(0)
+                )
+                # Compute SSIM (MuralLoss._ssim_loss returns 1 - SSIM)
+                single_ssim = 1.0 - self.criterion._ssim_loss(
+                    pred[i].unsqueeze(0), gt[i].unsqueeze(0)
+                ).item()
+
+                psnr_sum += single_psnr
+                ssim_sum += single_ssim
+                total += 1
+
+                # Save up to num_samples mosaics: Damaged | Restored | GT
+                if saved < num_samples:
+                    mosaic = torch.cat([
+                        (damaged[i] + 1) / 2,
+                        (pred[i]    + 1) / 2,
+                        (gt[i]      + 1) / 2,
+                    ], dim=2)
+                    filename = batch['path'][i]
+                    save_image(mosaic, os.path.join(out_dir, filename))
+                    saved += 1
+
+        # Compute and print averages
+        avg_psnr = psnr_sum / total if total > 0 else float('nan')
+        avg_ssim = ssim_sum / total if total > 0 else float('nan')
+        print(f"\nTest completed on {total} images.")
+        print(f"  • Average PSNR: {avg_psnr:.2f} dB")
+        print(f"  • Average SSIM: {avg_ssim:.4f}")
 
 def get_args() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -945,7 +1041,7 @@ def get_args() -> argparse.Namespace:
     # Model arguments
     parser.add_argument('--use_skip_connections', action='store_true', help="Use skip connections")
     parser.add_argument('--optimize_memory', action='store_true', help="Enable memory optimizations")
-    parser.add_argument('--unfreeze_encoder_stages', nargs='+', default=['stage1'], 
+    parser.add_argument('--unfreeze_encoder_stages', nargs='+', default=[], 
                       choices=['stage1', 'stage2', 'stage3', 'stage4'], 
                       help="Encoder stages to unfreeze")
     
@@ -956,8 +1052,10 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--beta1', type=float, default=0.9, help="Beta1 for Adam optimizer")
     parser.add_argument('--beta2', type=float, default=0.999, help="Beta2 for Adam optimizer")
     parser.add_argument('--grad_clip', type=float, default=1.0, help="Gradient clipping threshold")
-    parser.add_argument('--patience', type=int, default=20, help="Early stopping patience (0 to disable)")
+    parser.add_argument('--patience', type=int, default=10, help="Early stopping patience (0 to disable)")  # Added patience
     parser.add_argument('--use_amp', action='store_true', help="Use automatic mixed precision")
+    parser.add_argument('--best_weights', type=str, default='', help="download the checkpoint weights, don't recovery optimizer")
+
     
     # Loss function arguments
     parser.add_argument('--l1_weight', type=float, default=1.0, help="Weight for L1 loss")
@@ -968,7 +1066,7 @@ def get_args() -> argparse.Namespace:
     # Output arguments
     parser.add_argument('--output_dir', type=str, default='./output', help="Output directory")
     parser.add_argument('--resume', type=str, default='', help="Path to checkpoint for resuming training")
-    
+    parser.add_argument('--test_only', action='store_true')
     args = parser.parse_args()
     return args
 
@@ -986,7 +1084,19 @@ def main():
     
     # Initialize trainer
     trainer = MuralTrainer(args)
-    
+    if args.best_weights:
+        ckpt = torch.load(
+        args.best_weights,
+        map_location=trainer.device,
+        weights_only=False
+    )
+        trainer.model.load_state_dict(ckpt['model_state_dict'])
+        print(f"Loaded weights from {args.best_weights}")
+        trainer.best_val_psnr = ckpt.get('best_val_psnr', 0.0)
+    if args.test_only:
+        trainer.test_and_save_samples(num_samples=100)
+        print("Test samples saved to:", os.path.join(args.output_dir, 'test_samples'))
+        return
     # Train model
     history = trainer.train()
     
