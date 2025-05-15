@@ -27,7 +27,6 @@ from torchvision import transforms
 
 from physics_refine import PhysicsRefinementModule
 
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -42,13 +41,6 @@ logger = logging.getLogger("physics_analysis")
 def load_config(config_path, override_args=None):
     """
     Load configuration from a JSON file.
-    
-    Args:
-        config_path: Path to the configuration JSON file
-        override_args: Dictionary of arguments to override from command line
-        
-    Returns:
-        Dictionary with configuration parameters
     """
     default_config = {
         "output_dir": "physics_refinement_results",
@@ -101,12 +93,12 @@ def load_config(config_path, override_args=None):
         "layered_structure": {
             "layers": [
                 {
-                    "pigments": None,  # Will be filled based on analysis
+                    "pigments": None,  
                     "binder": "animal_glue",
                     "thickness": 20.0
                 },
                 {
-                    "pigments": None,  # Will be filled based on analysis
+                    "pigments": None, 
                     "binder": "animal_glue",
                     "thickness": 20.0
                 }
@@ -143,40 +135,29 @@ def load_config(config_path, override_args=None):
         ]
     }
     
-    # Load config file if provided
     if config_path and os.path.exists(config_path):
         try:
             with open(config_path, 'r') as f:
                 loaded_config = json.load(f)
-                # Merge with default config (recursive update)
                 merge_configs(default_config, loaded_config)
         except Exception as e:
             logger.error(f"Error loading config file: {e}")
             logger.error(traceback.format_exc())
-    
-    # Apply command-line overrides
+
     if override_args:
         apply_overrides(default_config, override_args)
     
     return default_config
 
-
 def merge_configs(base_config, override_config):
     """
     Recursively merge override_config into base_config.
-    
-    Args:
-        base_config: Base configuration dictionary (modified in place)
-        override_config: Override configuration dictionary
     """
     for key, value in override_config.items():
         if isinstance(value, dict) and key in base_config and isinstance(base_config[key], dict):
-            # Recursive merge for nested dictionaries
             merge_configs(base_config[key], value)
         else:
-            # Direct override for everything else
             base_config[key] = value
-
 
 def apply_overrides(config, override_args):
     if 'image_path' in override_args and override_args['image_path']:
@@ -188,17 +169,9 @@ def apply_overrides(config, override_args):
     if 'tests' in override_args and override_args['tests']:
         config['tests_to_run'] = override_args['tests'].split(',')
 
-
-
 def create_output_directory(config):
     """
     Create output directory with timestamp for results.
-    
-    Args:
-        config: Configuration dictionary
-        
-    Returns:
-        Path to created output directory
     """
     base_dir = config['output_dir']
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -218,12 +191,6 @@ def create_output_directory(config):
 def setup_device(config):
     """
     Set up the computation device based on configuration.
-    
-    Args:
-        config: Configuration dictionary
-        
-    Returns:
-        PyTorch device
     """
     if config['use_gpu'] and torch.cuda.is_available():
         device = torch.device('cuda')
@@ -241,13 +208,6 @@ def setup_device(config):
 def load_image(config, device):
     """
     Load and preprocess the input image.
-    
-    Args:
-        config: Configuration dictionary
-        device: PyTorch device
-        
-    Returns:
-        Preprocessed image tensor
     """
     image_path = config['image']['path']
 
@@ -299,15 +259,6 @@ def load_image(config, device):
 def run_pigment_analysis(physics_module, image_tensor, config, output_dir):
     """
     Run pigment analysis on the input image.
-    
-    Args:
-        physics_module: Initialized PhysicsRefinementModule
-        image_tensor: Preprocessed image tensor
-        config: Configuration dictionary
-        output_dir: Output directory for saving results
-        
-    Returns:
-        Dictionary with analysis results
     """
     logger.info("Running Pigment Analysis...")
 
@@ -360,15 +311,6 @@ def run_pigment_analysis(physics_module, image_tensor, config, output_dir):
 def run_stability_validation(physics_module, analysis_result, config, output_dir):
     """
     Run pigment mixture stability validation.
-    
-    Args:
-        physics_module: Initialized PhysicsRefinementModule
-        analysis_result: Results from pigment analysis
-        config: Configuration dictionary
-        output_dir: Output directory for saving results
-        
-    Returns:
-        Dictionary with stability validation results
     """
     logger.info("Running Stability Validation...")
 
@@ -446,16 +388,6 @@ def run_stability_validation(physics_module, analysis_result, config, output_dir
 def run_aging_simulation(physics_module, test_pigments, test_ratios, config, output_dir):
     """
     Run aging simulation.
-    
-    Args:
-        physics_module: Initialized PhysicsRefinementModule
-        test_pigments: Tensor of pigment indices
-        test_ratios: Tensor of mixing ratios
-        config: Configuration dictionary
-        output_dir: Output directory for saving results
-        
-    Returns:
-        Dictionary with aging simulation results
     """
     logger.info("Running Aging Simulation...")
 
@@ -507,16 +439,6 @@ def run_aging_simulation(physics_module, test_pigments, test_ratios, config, out
 def run_optical_properties(physics_module, test_pigments, test_ratios, config, output_dir):
     """
     Run optical properties calculation.
-    
-    Args:
-        physics_module: Initialized PhysicsRefinementModule
-        test_pigments: Tensor of pigment indices
-        test_ratios: Tensor of mixing ratios
-        config: Configuration dictionary
-        output_dir: Output directory for saving results
-        
-    Returns:
-        Dictionary with optical properties results
     """
     logger.info("Running Optical Properties Calculation...")
 
@@ -588,15 +510,6 @@ def run_optical_properties(physics_module, test_pigments, test_ratios, config, o
 def run_layered_structure_analysis(physics_module, analysis_result, config, output_dir):
     """
     Run layered structure analysis.
-    
-    Args:
-        physics_module: Initialized PhysicsRefinementModule
-        analysis_result: Results from pigment analysis
-        config: Configuration dictionary
-        output_dir: Output directory for saving results
-        
-    Returns:
-        Dictionary with layered structure analysis results
     """
     logger.info("Running Layered Structure Analysis...")
 
@@ -656,16 +569,6 @@ def run_layered_structure_analysis(physics_module, analysis_result, config, outp
 def run_historical_accuracy(physics_module, test_pigments, test_ratios, config, output_dir):
     """
     Run historical accuracy analysis.
-    
-    Args:
-        physics_module: Initialized PhysicsRefinementModule
-        test_pigments: Tensor of pigment indices
-        test_ratios: Tensor of mixing ratios
-        config: Configuration dictionary
-        output_dir: Output directory for saving results
-        
-    Returns:
-        Dictionary with historical accuracy analysis results
     """
     logger.info("Running Historical Accuracy Analysis...")
 
@@ -721,16 +624,6 @@ def run_historical_accuracy(physics_module, test_pigments, test_ratios, config, 
 def run_full_rendering(physics_module, test_pigments, test_ratios, config, output_dir):
     """
     Run full rendering simulation.
-    
-    Args:
-        physics_module: Initialized PhysicsRefinementModule
-        test_pigments: Tensor of pigment indices
-        test_ratios: Tensor of mixing ratios
-        config: Configuration dictionary
-        output_dir: Output directory for saving results
-        
-    Returns:
-        Dictionary with full rendering results
     """
     logger.info("Running Full Rendering Simulation...")
 
@@ -789,15 +682,6 @@ def visualize_physics_refined_images(image_tensor, analysis_result, optical_resu
                                     aging_result=None, save_path=None, show=False):
     """
     Create a comprehensive visualization of physics refined images
-    
-    Args:
-        image_tensor: Original image tensor
-        analysis_result: Pigment analysis result
-        optical_result: Optical properties result
-        render_result: Full rendering result
-        aging_result: Optional aging simulation result
-        save_path: Path to save the visualization
-        show: Whether to display the plot
     """
     orig_img = image_tensor[0].permute(1, 2, 0).cpu().detach().numpy()
 
@@ -1102,15 +986,6 @@ def wavelength_to_rgb(wavelength):
 def generate_scientific_report(results, image_path, config, output_dir):
     """
     Generate a comprehensive scientific report in markdown format.
-    
-    Args:
-        results: Dictionary containing all analysis results
-        image_path: Path to the analyzed image
-        config: Configuration used for the analysis
-        output_dir: Output directory for saving the report
-        
-    Returns:
-        Path to the generated report
     """
     report_path = os.path.join(output_dir, "scientific_report.md")
     
@@ -1281,9 +1156,7 @@ def generate_scientific_report(results, image_path, config, output_dir):
     logger.info(f"Scientific report generated at {report_path}")
     return report_path
 
-
 def main():
-    """Main execution function"""
     parser = argparse.ArgumentParser(description="Enhanced Physics-Based Pigment Analysis Demo")
     parser.add_argument("--config", type=str, help="Path to configuration file (JSON)")
     parser.add_argument("--image", dest="image_path", type=str, help="Path to input image")
