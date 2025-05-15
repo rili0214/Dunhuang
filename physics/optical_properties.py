@@ -219,12 +219,6 @@ class OpticalProperties(nn.Module):
     def _spectral_to_rgb_conversion(self, spectral_values):
         """
         Convert spectral reflectance values to RGB.
-        
-        Args:
-            spectral_values: Tensor or list of shape [..., spectral_bands]
-            
-        Returns:
-            RGB values: Tensor of shape [..., 3]
         """
         if isinstance(spectral_values, list):
             spectral_values = torch.tensor(spectral_values, device=self.device, dtype=torch.float32)
