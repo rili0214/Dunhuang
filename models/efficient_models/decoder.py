@@ -1,27 +1,13 @@
 """
 decoder.py - Memory-Efficient Decoder for Dun Huang Mural Restoration
 
-This module implements a simplified and memory-efficient decoder, relying on the 
-physics refinement module for domain-specific processing. The decoder focuses on 
-structural image restoration while optimizing memory usage.
-
 Key components:
 - ChannelCompression: Reduces channel dimensions
 - SkipFusion: Enhanced skip connection 
 - AdaptiveCSABlock: Generic cross-scale attention with dynamic window sizes
 - UpsampleBlock: Various upsampling strategies with residual refinement
 - EfficientDecoderModule: Streamlined decoder implementation
-
-Usage:
-    # Initialize with dimensions matching the encoder
-    decoder = EfficientDecoderModule(encoder_dims={
-        'stage1': 96, 'stage2': 192, 'stage3': 384, 'stage4': 768
-    })
-    
-    # Forward pass
-    restored_image = decoder(encoder_features)
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -32,47 +18,24 @@ import math
 def get_dynamic_window_size(resolution: Tuple[int, int]) -> int:
     """
     Calculate appropriate window size based on feature resolution.
-    
-    Args:
-        resolution (Tuple[int, int]): Feature map height and width
-    
-    Returns:
-        int: Calculated window size
     """
     avg_size = (resolution[0] + resolution[1]) // 2
     
     if avg_size <= 8:
-        return 8  # For smallest features (8×8)
+        return 8 
     elif avg_size <= 16:
-        return 6  # For medium-small features (16×16)
+        return 6 
     elif avg_size <= 32:
-        return 4  # For medium features (32×32)
+        return 4 
     else:
-        return 2  # For larger features (64×64 or higher)
+        return 2 
 
 
 class ChannelCompression(nn.Module):
     """
     Compresses feature channels while preserving important information.
-    
-    This module reduces the number of channels using a combination of
-    1×1 convolution and instance normalization to maintain feature distinctiveness.
-    
-    Attributes:
-        in_channels (int): Number of input channels
-        out_channels (int): Number of output channels
-        use_activation (bool): Whether to apply activation after compression
     """
-    
     def __init__(self, in_channels: int, out_channels: int, use_activation: bool = True):
-        """
-        Initialize the channel compression module.
-        
-        Args:
-            in_channels (int): Number of input channels
-            out_channels (int): Number of output channels
-            use_activation (bool): Whether to apply ReLU activation
-        """
         super(ChannelCompression, self).__init__()
         
         self.compress = nn.Sequential(
@@ -82,40 +45,15 @@ class ChannelCompression(nn.Module):
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Compress input feature channels.
-        
-        Args:
-            x (torch.Tensor): Input features [B, in_channels, H, W]
-            
-        Returns:
-            torch.Tensor: Compressed features [B, out_channels, H, W]
-        """
         return self.compress(x)
 
 
 class SkipFusion(nn.Module):
     """
     Enhanced skip connection with concatenation and 1×1 convolution.
-    
-    This module improves feature fusion by concatenating decoder features
-    with aligned encoder features, and using a 1×1 convolution to blend them.
-    
-    Attributes:
-        decoder_channels (int): Number of decoder feature channels
-        encoder_channels (int): Number of encoder feature channels
-        out_channels (int): Number of output channels
     """
     
     def __init__(self, decoder_channels: int, encoder_channels: int, out_channels: int):
-        """
-        Initialize the skip fusion module.
-        
-        Args:
-            decoder_channels (int): Number of decoder feature channels
-            encoder_channels (int): Number of encoder feature channels
-            out_channels (int): Number of output channels
-        """
         super(SkipFusion, self).__init__()
         
         self.fusion = nn.Sequential(
@@ -125,16 +63,6 @@ class SkipFusion(nn.Module):
         )
     
     def forward(self, decoder_feat: torch.Tensor, encoder_feat: torch.Tensor) -> torch.Tensor:
-        """
-        Fuse decoder and encoder features.
-        
-        Args:
-            decoder_feat (torch.Tensor): Decoder features [B, decoder_channels, H, W]
-            encoder_feat (torch.Tensor): Encoder features [B, encoder_channels, H', W']
-            
-        Returns:
-            torch.Tensor: Fused features [B, out_channels, H, W]
-        """
         # Align encoder features to decoder resolution
         if decoder_feat.shape[2:] != encoder_feat.shape[2:]:
             aligned_encoder = F.interpolate(
@@ -156,15 +84,7 @@ class SkipFusion(nn.Module):
 class ResolutionAligner(nn.Module):
     """
     Aligns and fuses features from different resolutions.
-    
-    This module handles multiple input features at different resolutions,
-    aligning them to a target resolution and channel dimension before fusion.
-    
-    Attributes:
-        target_channels (int): Target number of output channels
-        target_size (Tuple[int, int]): Target spatial dimensions (H, W)
     """
-    
     def __init__(
         self, 
         input_dims: Dict[str, int],
@@ -173,26 +93,16 @@ class ResolutionAligner(nn.Module):
     ):
         """
         Initialize the resolution aligner.
-        
-        Args:
-            input_dims (Dict[str, int]): Dictionary mapping feature names to channel dimensions
-            target_channels (int): Target number of output channels
-            target_size (Tuple[int, int]): Target output resolution (H, W)
         """
         super(ResolutionAligner, self).__init__()
         
         self.target_channels = target_channels
         self.target_size = target_size
-        
-        # Create channel compression modules for each input
         self.compressions = nn.ModuleDict({
             name: ChannelCompression(dims, target_channels)
             for name, dims in input_dims.items()
         })
-        
-        # Enhanced fusion - use grouped convolution for memory efficiency
         num_groups = min(4, len(input_dims))
-        
         self.fusion = nn.Sequential(
             nn.Conv2d(
                 target_channels * len(input_dims), 
@@ -205,30 +115,17 @@ class ResolutionAligner(nn.Module):
         )
     
     def forward(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Align and fuse multiple input features.
-        
-        Args:
-            features (Dict[str, torch.Tensor]): Dictionary of feature tensors at different scales
-            
-        Returns:
-            torch.Tensor: Fused features at target resolution and channels [B, target_channels, H, W]
-        """
         aligned_features = []
         
         for name, feature in features.items():
-            # Compress channels
             compressed = self.compressions[name](feature)
-            
-            # Resize to target size if needed
             if compressed.shape[2:] != self.target_size:
                 compressed = F.interpolate(
                     compressed, size=self.target_size, mode='bilinear', align_corners=False
                 )
             
             aligned_features.append(compressed)
-        
-        # Concatenate and fuse
+            
         x = torch.cat(aligned_features, dim=1)
         x = self.fusion(x)
         
@@ -238,13 +135,7 @@ class ResolutionAligner(nn.Module):
 class WindowAttention(nn.Module):
     """
     Window-based multi-head self-attention.
-    
-    Attributes:
-        dim (int): Input feature dimension
-        window_size (int): Size of the attention window
-        num_heads (int): Number of attention heads
     """
-    
     def __init__(
         self, 
         dim: int, 
@@ -254,17 +145,6 @@ class WindowAttention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0
     ):
-        """
-        Initialize window attention module.
-        
-        Args:
-            dim (int): Input feature dimension
-            window_size (int): Size of the attention window
-            num_heads (int): Number of attention heads
-            qkv_bias (bool): Whether to use bias in QKV projection
-            attn_drop (float): Dropout rate for attention matrix
-            proj_drop (float): Dropout rate for output projection
-        """
         super(WindowAttention, self).__init__()
         self.dim = dim
         self.window_size = window_size  
@@ -297,21 +177,10 @@ class WindowAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-        
-        # Initialize relative position bias table
+
         nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Compute windowed self-attention.
-        
-        Args:
-            x (torch.Tensor): Input features with shape [num_windows*B, window_size*window_size, C]
-            mask (Optional[torch.Tensor]): Attention mask
-                
-        Returns:
-            torch.Tensor: Attention output with shape [num_windows*B, window_size*window_size, C]
-        """
         B_, N, C = x.shape
         
         # QKV computation
@@ -330,8 +199,7 @@ class WindowAttention(nn.Module):
         )
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
         attn = attn + relative_position_bias.unsqueeze(0)
-        
-        # Apply mask if provided
+
         if mask is not None:
             nW = mask.shape[0]
             attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
@@ -354,15 +222,7 @@ class WindowAttention(nn.Module):
 class CSABlock(nn.Module):
     """
     Cross-Scale Attention Block.
-    
-    This block implements self-attention within windows with dynamic sizing.
-    
-    Attributes:
-        dim (int): Input feature dimension
-        num_heads (int): Number of attention heads
-        mlp_ratio (float): Ratio of MLP hidden dimension to input dimension
     """
-    
     def __init__(
         self,
         dim: int,
@@ -372,17 +232,6 @@ class CSABlock(nn.Module):
         drop: float = 0.0,
         attn_drop: float = 0.0
     ):
-        """
-        Initialize the CSA block.
-        
-        Args:
-            dim (int): Input feature dimension
-            num_heads (int): Number of attention heads
-            mlp_ratio (float): Ratio of MLP hidden dimension to input dimension
-            qkv_bias (bool): Whether to use bias in attention QKV projection
-            drop (float): Dropout rate for MLP
-            attn_drop (float): Dropout rate for attention
-        """
         super(CSABlock, self).__init__()
         
         # Normalization and MLP layers
@@ -421,24 +270,14 @@ class CSABlock(nn.Module):
     def _window_partition(self, x: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple]:
         """
         Partition input feature into windows.
-        
-        Args:
-            x (torch.Tensor): Input feature of shape [B, H, W, C]
-            window_size (int): Window size
-            
-        Returns:
-            Tuple[torch.Tensor, Tuple]: Windows and padding info
         """
         B, H, W, C = x.shape
-        
-        # Pad features if needed to ensure divisibility by window_size
         pad_h = (window_size - H % window_size) % window_size
         pad_w = (window_size - W % window_size) % window_size
         if pad_h > 0 or pad_w > 0:
             x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
             H, W = H + pad_h, W + pad_w
-        
-        # Reshape into windows
+
         x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
         windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size * window_size, C)
         
@@ -449,44 +288,23 @@ class CSABlock(nn.Module):
     ) -> torch.Tensor:
         """
         Reverse window partitioning.
-        
-        Args:
-            windows (torch.Tensor): Windows of shape [num_windows*B, window_size*window_size, C]
-            window_size (int): Window size
-            H, W, pad_h, pad_w: Size and padding information
-            
-        Returns:
-            torch.Tensor: Reversed feature of shape [B, H-pad_h, W-pad_w, C]
         """
         B = int(windows.shape[0] / ((H // window_size) * (W // window_size)))
         x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
         
-        # Remove padding if needed
         if pad_h > 0 or pad_w > 0:
             x = x[:, :H-pad_h, :W-pad_w, :]
             
         return x
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the CSA block with dynamic window size.
-        
-        Args:
-            x (torch.Tensor): Input feature of shape [B, C, H, W]
-            
-        Returns:
-            torch.Tensor: Processed feature of shape [B, C, H, W]
-        """
         B, C, H, W = x.shape
         shortcut = x
         
-        # Change from BCHW to BHWC for window attention
         x = x.permute(0, 2, 3, 1).contiguous()  # [B, H, W, C]
-        
-        # Compute dynamic window size based on feature resolution
-        window_size = get_dynamic_window_size((H, W))
 
+        window_size = get_dynamic_window_size((H, W))
         window_attn = self.attn_modules[f'window_{window_size}']
         
         # Apply window attention
@@ -521,17 +339,7 @@ class CSABlock(nn.Module):
 class UpsampleBlock(nn.Module):
     """
     Upsampling block with residual refinement.
-    
-    This module handles upsampling of feature maps using either transposed convolution
-    or pixel shuffle, with appropriate normalization and activation.
-    
-    Attributes:
-        in_channels (int): Number of input channels
-        out_channels (int): Number of output channels
-        scale_factor (int): Upsampling scale factor
-        mode (str): Upsampling mode ('transpose_conv', 'pixel_shuffle', or 'learned_pixel_shuffle')
     """
-    
     def __init__(
         self,
         in_channels: int,
@@ -539,17 +347,7 @@ class UpsampleBlock(nn.Module):
         scale_factor: int = 2,
         mode: str = 'pixel_shuffle'
     ):
-        """
-        Initialize the upsampling block.
-        
-        Args:
-            in_channels (int): Number of input channels
-            out_channels (int): Number of output channels
-            scale_factor (int): Upsampling scale factor
-            mode (str): Upsampling mode ('transpose_conv', 'pixel_shuffle', or 'learned_pixel_shuffle')
-        """
         super(UpsampleBlock, self).__init__()
-        
         self.mode = mode
         
         if mode == 'transpose_conv':
@@ -597,46 +395,20 @@ class UpsampleBlock(nn.Module):
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Upsample the input feature map with refinement.
-        
-        Args:
-            x (torch.Tensor): Input feature map [B, in_channels, H, W]
-            
-        Returns:
-            torch.Tensor: Upsampled and refined feature map [B, out_channels, H*scale_factor, W*scale_factor]
-        """
-        # Upsample
         x = self.upsample(x)
         
-        # Refine with residual connection
         return x + self.refine(x)
 
 
 class DecoderModule(nn.Module):
     """
     Decoder module for Dun Huang Mural restoration.
-    
-    This module implements a streamlined decoder architecture that focuses on
-    structural image restoration.
-    
-    Attributes:
-        encoder_dims (Dict[str, int]): Dimensions of encoder feature maps
-        skip_connections (bool): Whether to use skip connections
     """
-    
     def __init__(
         self,
         encoder_dims: Dict[str, int],
         skip_connections: bool = True
     ):
-        """
-        Initialize the mural decoder module.
-        
-        Args:
-            encoder_dims (Dict[str, int]): Dictionary mapping encoder stage names to channel dimensions
-            skip_connections (bool): Whether to use enhanced skip connections from encoder to decoder
-        """
         super(DecoderModule, self).__init__()
         
         self.skip_connections = skip_connections
@@ -841,36 +613,3 @@ class DecoderModule(nn.Module):
         restored_image = self.output_proj(stage4_out)
         
         return restored_image
-
-
-# Example usage
-if __name__ == "__main__":
-    # Create dummy encoder features
-    batch_size = 2
-    encoder_features = {
-        'stage1': torch.randn(batch_size, 96, 64, 64),
-        'stage2': torch.randn(batch_size, 192, 32, 32),
-        'stage3': torch.randn(batch_size, 384, 16, 16),
-        'stage4': torch.randn(batch_size, 768, 8, 8)
-    }
-    
-    # Initialize the efficient decoder
-    decoder = DecoderModule(
-        encoder_dims={
-            'stage1': 96,
-            'stage2': 192,
-            'stage3': 384,
-            'stage4': 768
-        },
-        skip_connections=True
-    )
-    
-    # Forward pass
-    restored_image = decoder(encoder_features)
-    
-    # Print output shape
-    print(f"Restored image shape: {restored_image.shape}")  # Should be [2, 3, 256, 256]
-    
-    # Print number of parameters
-    num_params = sum(p.numel() for p in decoder.parameters())
-    print(f"Number of parameters: {num_params:,}")
